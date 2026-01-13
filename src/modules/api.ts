@@ -2,7 +2,7 @@
  * HTTP API endpoint for exporting annotations via citation key.
  *
  * Endpoint: POST http://localhost:<port>/export-org/citekey
- * Body: {"key": "<citekey>"}
+ * Body: {"key": "<citekey>", "libraryID": <optional-number>}
  *
  * Response: JSON with org-mode formatted annotations
  *
@@ -39,9 +39,11 @@ interface ApiResponse {
 /**
  * Find a Zotero item by its citation key.
  * Uses Better BibTeX JSON-RPC API, then falls back to Extra field search.
+ * @param citekey - The citation key to look up
+ * @param libraryID - Optional library ID (for group libraries)
  */
-async function findItemByCitekey(citekey: string): Promise<Zotero.Item | null> {
-  ztoolkit.log("Looking up citekey:", citekey);
+async function findItemByCitekey(citekey: string, libraryID?: number): Promise<Zotero.Item | null> {
+  ztoolkit.log("Looking up citekey:", citekey, "libraryID:", libraryID);
 
   // Try Better BibTeX JSON-RPC API
   try {
@@ -51,13 +53,19 @@ async function findItemByCitekey(citekey: string): Promise<Zotero.Item | null> {
     const port = (Zotero as unknown as { Prefs: { get: (key: string) => number } }).Prefs.get("httpServer.port") || 23119;
     const url = `http://localhost:${port}/better-bibtex/json-rpc`;
 
+    // BBT item.search accepts optional library parameter
+    const params: (string | number)[] = [citekey];
+    if (libraryID !== undefined) {
+      params.push(libraryID);
+    }
+
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         jsonrpc: "2.0",
         method: "item.search",
-        params: [citekey],
+        params,
         id: 1,
       }),
     });
@@ -80,9 +88,9 @@ async function findItemByCitekey(citekey: string): Promise<Zotero.Item | null> {
 
         if (itemKey) {
           ztoolkit.log("Found item key:", itemKey);
-          const libraryID = bbtItem.libraryID ?? Zotero.Libraries.userLibraryID;
+          const itemLibraryID = libraryID ?? bbtItem.libraryID ?? Zotero.Libraries.userLibraryID;
           const item = await (Zotero as unknown as { Items: { getByLibraryAndKeyAsync: (lib: number, key: string) => Promise<Zotero.Item | null> } })
-            .Items.getByLibraryAndKeyAsync(libraryID, itemKey);
+            .Items.getByLibraryAndKeyAsync(itemLibraryID, itemKey);
           if (item) {
             ztoolkit.log("Found item via BBT:", item.getField("title"));
             return item;
@@ -99,6 +107,9 @@ async function findItemByCitekey(citekey: string): Promise<Zotero.Item | null> {
     ztoolkit.log("Trying Extra field search...");
     const s = new (Zotero as unknown as { Search: new () => ZoteroSearch }).Search();
     s.addCondition("extra", "contains", citekey);
+    if (libraryID !== undefined) {
+      s.addCondition("libraryID", "is", String(libraryID));
+    }
     const ids = await s.search();
     ztoolkit.log("Search returned ids:", ids);
 
@@ -141,7 +152,7 @@ interface ZoteroSearch {
 
 /**
  * HTTP endpoint handler for /export-org/citekey
- * Accepts POST with JSON body: {"key": "<citekey>"}
+ * Accepts POST with JSON body: {"key": "<citekey>", "libraryID": <optional>}
  */
 function CitekeyEndpoint() {
   // @ts-expect-error - Zotero endpoint pattern
@@ -158,18 +169,22 @@ function CitekeyEndpoint() {
       body?: string,
     ) => void,
   ) {
-    // Parse citekey from POST body (JSON object with key property)
+    // Parse citekey and optional libraryID from POST body
     // Note: GET with query params is not supported by Zotero's server
     let citekey: string | undefined;
+    let libraryID: number | undefined;
 
     if (data && typeof data === "object") {
       const dataObj = data as Record<string, unknown>;
       if (typeof dataObj.key === "string") {
         citekey = dataObj.key;
       }
+      if (typeof dataObj.libraryID === "number") {
+        libraryID = dataObj.libraryID;
+      }
     }
 
-    ztoolkit.log("API request, citekey:", citekey);
+    ztoolkit.log("API request, citekey:", citekey, "libraryID:", libraryID);
 
     if (!citekey) {
       const response: ApiResponse = {
@@ -181,8 +196,8 @@ function CitekeyEndpoint() {
     }
 
     try {
-      // Find item by citekey
-      const item = await findItemByCitekey(citekey);
+      // Find item by citekey (with optional libraryID)
+      const item = await findItemByCitekey(citekey, libraryID);
 
       if (!item) {
         const response: ApiResponse = {

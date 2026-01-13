@@ -1,7 +1,7 @@
 ;;; org-zotero-annots.el --- Insert Zotero annotations as org subtrees -*- lexical-binding: t -*-
 
 ;; Author: Matt Price
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: org, zotero, annotations, pdf
 ;; URL: https://github.com/titaniumbones/zotero-export-notes
@@ -24,7 +24,11 @@
 ;;
 ;; Configuration:
 ;;   (setq org-zotero-annots-port 23119)  ; Zotero HTTP server port
-;;   (setq org-zotero-annots-use-citar t) ; Use citar for key selection
+;;   (setq org-zotero-annots-citekey-source 'auto)  ; 'auto, 'citar, 'bbt, or 'manual
+;;
+;; Per-file library ID (for group libraries):
+;;   #+ZOTERO_LIBRARY: 123
+;;   Or set via file-local variable: org-zotero-annots-library-id
 
 ;;; Code:
 
@@ -46,11 +50,16 @@ Check Zotero preferences (Advanced > Config Editor) for
   :type 'integer
   :group 'org-zotero-annots)
 
-(defcustom org-zotero-annots-use-citar t
-  "Use citar for citation key selection when available.
-When non-nil and citar is loaded, `citar-select-ref' will be used
-for selecting citation keys with completion."
-  :type 'boolean
+(defcustom org-zotero-annots-citekey-source 'auto
+  "Source for citation key selection.
+- `auto': Use citar if available, else BBT search, else manual entry
+- `citar': Always use citar (requires citar package and bibliography)
+- `bbt': Always use Better BibTeX JSON-RPC search
+- `manual': Always prompt for manual text entry"
+  :type '(choice (const :tag "Auto-detect best available" auto)
+                 (const :tag "Citar (requires setup)" citar)
+                 (const :tag "Better BibTeX search" bbt)
+                 (const :tag "Manual entry" manual))
   :group 'org-zotero-annots)
 
 (defcustom org-zotero-annots-timeout 30
@@ -58,41 +67,169 @@ for selecting citation keys with completion."
   :type 'integer
   :group 'org-zotero-annots)
 
-;;; Internal Functions
+;;; Buffer-local Variables
+
+(defvar-local org-zotero-annots-library-id nil
+  "Zotero library ID for this buffer.
+Set this for group libraries. Can be configured via:
+- #+ZOTERO_LIBRARY: <id> keyword in org file
+- File-local variable
+- `setq-local' in your config")
+(put 'org-zotero-annots-library-id 'safe-local-variable #'integerp)
+
+;;; Internal Functions - HTTP Helpers
+
+(defun org-zotero-annots--http-post (url data)
+  "Make HTTP POST request to URL with DATA (alist).
+Returns parsed JSON response or nil on error."
+  (let* ((url-request-method "POST")
+         (url-request-extra-headers '(("Content-Type" . "application/json")))
+         (url-request-data (encode-coding-string (json-encode data) 'utf-8))
+         buffer)
+    (condition-case nil
+        (setq buffer (url-retrieve-synchronously url nil nil org-zotero-annots-timeout))
+      (error (setq buffer nil)))
+    (when buffer
+      (unwind-protect
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (when (re-search-forward "^\r?\n" nil t)
+              (let* ((json-object-type 'plist)
+                     (json-key-type 'keyword)
+                     (json-text (buffer-substring-no-properties (point) (point-max))))
+                (condition-case nil
+                    (json-read-from-string json-text)
+                  (error nil)))))
+        (kill-buffer buffer)))))
+
+;;; Internal Functions - Library ID
+
+(defun org-zotero-annots--get-library-id ()
+  "Get the Zotero library ID for current buffer.
+Checks buffer-local variable first, then #+ZOTERO_LIBRARY keyword."
+  (or org-zotero-annots-library-id
+      (org-zotero-annots--parse-org-keyword "ZOTERO_LIBRARY")))
+
+(defun org-zotero-annots--parse-org-keyword (keyword)
+  "Parse #+KEYWORD: value from current org buffer.
+Returns the value as a string, or nil if not found."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search t)
+          (re (format "^#\\+%s:[ \t]+\\(.+\\)$" (regexp-quote keyword))))
+      (when (re-search-forward re nil t)
+        (let ((val (string-trim (match-string 1))))
+          ;; Convert to number if it looks like one
+          (if (string-match-p "^[0-9]+$" val)
+              (string-to-number val)
+            val))))))
+
+;;; Internal Functions - Better BibTeX Search
+
+(defun org-zotero-annots--bbt-available-p ()
+  "Check if Better BibTeX JSON-RPC is available."
+  (let ((response (org-zotero-annots--http-post
+                   (format "http://localhost:%d/better-bibtex/json-rpc"
+                           org-zotero-annots-port)
+                   '((jsonrpc . "2.0")
+                     (method . "item.search")
+                     (params . [""])
+                     (id . 1)))))
+    (and response (plist-get response :result))))
+
+(defun org-zotero-annots--bbt-search (query)
+  "Search Better BibTeX for items matching QUERY.
+Returns list of items with :citekey, :title, :author properties."
+  (let* ((library-id (org-zotero-annots--get-library-id))
+         (params (if library-id
+                     (vector query library-id)
+                   (vector query)))
+         (response (org-zotero-annots--http-post
+                    (format "http://localhost:%d/better-bibtex/json-rpc"
+                            org-zotero-annots-port)
+                    `((jsonrpc . "2.0")
+                      (method . "item.search")
+                      (params . ,params)
+                      (id . 1)))))
+    (when response
+      (let ((items (plist-get response :result)))
+        (mapcar (lambda (item)
+                  (list :citekey (plist-get item :citekey)
+                        :title (or (plist-get item :title) "")
+                        :author (or (plist-get item :author) "")))
+                items)))))
+
+(defun org-zotero-annots--bbt-format-candidate (item)
+  "Format ITEM for completion display."
+  (let ((citekey (plist-get item :citekey))
+        (title (plist-get item :title))
+        (author (plist-get item :author)))
+    (format "%s - %s (%s)"
+            citekey
+            (if (> (length title) 50)
+                (concat (substring title 0 47) "...")
+              title)
+            (if (> (length author) 30)
+                (concat (substring author 0 27) "...")
+              author))))
+
+(defun org-zotero-annots--bbt-select-ref ()
+  "Select a citation key using Better BibTeX search.
+Provides incremental search with completion."
+  (let* ((items (org-zotero-annots--bbt-search ""))
+         (candidates (mapcar (lambda (item)
+                               (cons (org-zotero-annots--bbt-format-candidate item)
+                                     (plist-get item :citekey)))
+                             items)))
+    (if candidates
+        (let ((selection (completing-read "Select reference: " candidates nil t)))
+          (cdr (assoc selection candidates)))
+      (user-error "No items found in Better BibTeX. Is Zotero running?"))))
+
+;;; Internal Functions - Citation Key Selection
+
+(defun org-zotero-annots--read-citekey ()
+  "Read citation key based on `org-zotero-annots-citekey-source'."
+  (pcase org-zotero-annots-citekey-source
+    ('manual (read-string "Citation key: "))
+    ('citar
+     (if (fboundp 'citar-select-ref)
+         (citar-select-ref)
+       (user-error "Citar not available. Install citar or use 'bbt or 'auto")))
+    ('bbt (org-zotero-annots--bbt-select-ref))
+    ('auto
+     (cond
+      ;; Try citar first
+      ((fboundp 'citar-select-ref)
+       (citar-select-ref))
+      ;; Fall back to BBT search
+      ((org-zotero-annots--bbt-available-p)
+       (org-zotero-annots--bbt-select-ref))
+      ;; Manual entry as last resort
+      (t (read-string "Citation key: "))))))
+
+;;; Internal Functions - Fetch and Insert
 
 (defun org-zotero-annots--fetch (citekey)
   "Fetch annotations for CITEKEY from Zotero API.
 Returns a plist with :success, :org, :title, :count, and :error keys."
-  (let* ((url-request-method "POST")
-         (url-request-extra-headers '(("Content-Type" . "application/json")))
-         (url-request-data (json-encode `((key . ,citekey))))
+  (let* ((library-id (org-zotero-annots--get-library-id))
+         (request-data (if library-id
+                           `((key . ,citekey) (libraryID . ,library-id))
+                         `((key . ,citekey))))
          (url (format "http://localhost:%d/export-org/citekey" org-zotero-annots-port))
-         (buffer (condition-case err
-                     (url-retrieve-synchronously url nil nil org-zotero-annots-timeout)
-                   (error
-                    (list :success nil
-                          :error (format "Connection failed: %s. Is Zotero running?" (error-message-string err)))))))
-    (if (listp buffer)
-        buffer  ; Return error plist
-      (unwind-protect
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            ;; Skip HTTP headers
-            (re-search-forward "^\r?\n" nil t)
-            (let* ((json-object-type 'plist)
-                   (json-key-type 'keyword)
-                   (response (condition-case nil
-                                 (json-read)
-                               (error nil))))
-              (if (and response (plist-get response :success))
-                  (list :success t
-                        :org (plist-get response :org)
-                        :title (plist-get response :title)
-                        :count (plist-get response :annotationCount))
-                (list :success nil
-                      :error (or (plist-get response :error)
-                                 "Unknown error from Zotero API")))))
-        (kill-buffer buffer)))))
+         (response (org-zotero-annots--http-post url request-data)))
+    (if response
+        (if (eq (plist-get response :success) t)
+            (list :success t
+                  :org (plist-get response :org)
+                  :title (plist-get response :title)
+                  :count (plist-get response :annotationCount))
+          (list :success nil
+                :error (or (plist-get response :error) "Unknown API error")))
+      (list :success nil
+            :error (format "Connection failed (port %d). Is Zotero running?"
+                           org-zotero-annots-port)))))
 
 (defun org-zotero-annots--adjust-heading-level (org-text target-level)
   "Adjust heading levels in ORG-TEXT to start at TARGET-LEVEL.
@@ -113,13 +250,6 @@ Otherwise, shift all headings so the top-level becomes TARGET-LEVEL."
                    (new-stars (make-string (+ (length stars) shift) ?*)))
               (replace-match new-stars nil nil nil 1)))
           (buffer-string))))))
-
-(defun org-zotero-annots--read-citekey ()
-  "Read citation key, using citar if available and enabled."
-  (if (and org-zotero-annots-use-citar
-           (fboundp 'citar-select-ref))
-      (citar-select-ref)
-    (read-string "Citation key: ")))
 
 (defun org-zotero-annots--current-level ()
   "Return the current org heading level, or 0 if not in a heading."
@@ -159,14 +289,20 @@ Otherwise, insert at end of current subtree."
 (defun org-zotero-annots-insert (citekey)
   "Insert Zotero annotations for CITEKEY at end of current subtree.
 If not in a heading, insert at end of buffer as top-level heading.
-With citar available, provides completion for citation key selection."
+
+Citation key selection method is controlled by `org-zotero-annots-citekey-source':
+- `auto': Uses citar if available, else BBT search, else manual
+- `citar': Uses citar completion (requires citar package)
+- `bbt': Uses Better BibTeX search
+- `manual': Prompts for manual entry"
   (interactive (list (org-zotero-annots--read-citekey)))
   (org-zotero-annots--insert-content citekey nil))
 
 ;;;###autoload
 (defun org-zotero-annots-insert-at-point (citekey)
   "Insert Zotero annotations for CITEKEY at point.
-With citar available, provides completion for citation key selection."
+
+Citation key selection method is controlled by `org-zotero-annots-citekey-source'."
   (interactive (list (org-zotero-annots--read-citekey)))
   (org-zotero-annots--insert-content citekey t))
 
