@@ -2,6 +2,7 @@
  * Plugin lifecycle hooks for Zotero Export Org Notes.
  */
 
+import { ApiEndpoints } from "./modules/api";
 import { MenuFactory } from "./modules/menu";
 import { createZToolkit } from "./utils/ztoolkit";
 
@@ -11,6 +12,9 @@ async function onStartup() {
     Zotero.unlockPromise,
     Zotero.uiReadyPromise,
   ]);
+
+  // Register HTTP API endpoints
+  ApiEndpoints.register();
 
   await Promise.all(
     Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),

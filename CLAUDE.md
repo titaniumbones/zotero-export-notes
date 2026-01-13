@@ -93,12 +93,49 @@ npm run build        # Production build
 npm run release      # Version bump and release
 ```
 
-## Plugin Integration Points
+## Plugin Features
 
-For this export feature, we need:
-1. **Menu item**: Add "Export Annotations to Org" to context menu or Tools menu
-2. **Reader event listener**: Optional - access via `Zotero.Reader.registerEventListener()`
-3. **File save dialog**: Prompt user for save location
+### Context Menu
+Right-click on items with PDF attachments to access:
+- **Save to File...** - Export annotations to an .org file
+- **Copy to Clipboard** - Copy org-formatted annotations
+
+### HTTP API Endpoint
+
+The plugin exposes an HTTP API endpoint on Zotero's built-in server (port 23119).
+
+**Endpoint:**
+```
+GET http://localhost:23119/export-org/citekey/<citekey>
+```
+
+**Example:**
+```bash
+curl http://localhost:23119/export-org/citekey/smith2023deep
+```
+
+**Response (JSON):**
+```json
+{
+  "success": true,
+  "citekey": "smith2023deep",
+  "title": "Deep Learning for NLP",
+  "annotationCount": 5,
+  "org": "* Deep Learning for NLP\n:PROPERTIES:\n..."
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "error": "Item not found for citekey: smith2023deep"
+}
+```
+
+**Notes:**
+- Requires Better BibTeX for citation keys, or use "Citation Key: xxx" in Extra field
+- Only accessible from localhost (127.0.0.1)
 
 ## Testing Strategy
 
