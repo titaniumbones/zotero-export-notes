@@ -1,9 +1,13 @@
 /**
  * HTTP API endpoint for exporting annotations via citation key.
  *
- * Endpoint: GET http://localhost:23119/export-org/citekey/<citekey>
+ * Endpoint: POST http://localhost:<port>/export-org/citekey
+ * Body: {"key": "<citekey>"}
  *
  * Response: JSON with org-mode formatted annotations
+ *
+ * Note: GET requests with query parameters are not supported due to
+ * Zotero server limitations. Use POST with JSON body instead.
  */
 
 import { Exporter } from "./exporter";
@@ -136,11 +140,12 @@ interface ZoteroSearch {
 }
 
 /**
- * HTTP endpoint handler for /export-org/citekey?key=<citekey>
+ * HTTP endpoint handler for /export-org/citekey
+ * Accepts POST with JSON body: {"key": "<citekey>"}
  */
 function CitekeyEndpoint() {
   // @ts-expect-error - Zotero endpoint pattern
-  this.supportedMethods = ["GET", "POST"];
+  this.supportedMethods = ["POST"];
   // @ts-expect-error - Zotero endpoint pattern
   this.permitBookmarklet = false;
 
@@ -153,59 +158,23 @@ function CitekeyEndpoint() {
       body?: string,
     ) => void,
   ) {
-    // Debug: log what we receive
-    const self = this as unknown as Record<string, unknown>;
-    ztoolkit.log("API endpoint called. data:", data, "this:", Object.keys(self));
-
-    // Parse citekey from query parameter
-    // URL format: /export-org/citekey?key=<citekey>
+    // Parse citekey from POST body (JSON object with key property)
+    // Note: GET with query params is not supported by Zotero's server
     let citekey: string | undefined;
 
-    // For GET requests, data is the query string (e.g., "key=value&foo=bar")
-    if (typeof data === "string" && data) {
-      const match = data.match(/key=([^&]+)/);
-      if (match) {
-        citekey = decodeURIComponent(match[1]);
-      }
-    }
-
-    // Try data as object with query property
-    if (!citekey && data && typeof data === "object") {
+    if (data && typeof data === "object") {
       const dataObj = data as Record<string, unknown>;
       if (typeof dataObj.key === "string") {
         citekey = dataObj.key;
-      } else if (dataObj.query && typeof dataObj.query === "object") {
-        const query = dataObj.query as Record<string, string>;
-        citekey = query.key;
       }
     }
 
-    // Check 'this' context for URL/query info
-    if (!citekey) {
-      if (typeof self.query === "string") {
-        const match = self.query.match(/key=([^&]+)/);
-        if (match) {
-          citekey = decodeURIComponent(match[1] as string);
-        }
-      } else if (self.query && typeof self.query === "object") {
-        const query = self.query as Record<string, string>;
-        citekey = query.key;
-      }
-      if (!citekey && typeof self.pathname === "string") {
-        // Try to extract from pathname if passed as path parameter
-        const match = (self.pathname as string).match(/\/export-org\/citekey\/(.+)/);
-        if (match) {
-          citekey = decodeURIComponent(match[1]);
-        }
-      }
-    }
-
-    ztoolkit.log("Parsed citekey:", citekey);
+    ztoolkit.log("API request, citekey:", citekey);
 
     if (!citekey) {
       const response: ApiResponse = {
         success: false,
-        error: "Missing 'key' parameter. Use: /export-org/citekey?key=<citekey>",
+        error: "Missing 'key' parameter. Use POST with JSON body: {\"key\": \"<citekey>\"}",
       };
       sendResponseCallback(400, "application/json", JSON.stringify(response));
       return;
@@ -268,10 +237,7 @@ export class ApiEndpoints {
    * Register HTTP API endpoints with Zotero's server.
    */
   static register(): void {
-    // Register the citekey endpoint
-    // The endpoint pattern allows any path after /export-org/citekey/
     Zotero.Server.Endpoints["/export-org/citekey"] = CitekeyEndpoint;
-
-    ztoolkit.log("Registered API endpoint: /export-org/citekey/<citekey>");
+    ztoolkit.log("Registered API endpoint: POST /export-org/citekey");
   }
 }
