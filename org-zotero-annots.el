@@ -173,17 +173,37 @@ Returns list of items with :citekey, :title, :author properties."
                 (concat (substring author 0 27) "...")
               author))))
 
+(defun org-zotero-annots--zotero-picker ()
+  "Open Zotero's item picker and return the selected item's citekey."
+  (let* ((library-id (org-zotero-annots--get-library-id))
+         (request-data (when library-id `((libraryID . ,library-id))))
+         (response (org-zotero-annots--http-post
+                    (format "http://localhost:%d/export-org/picker"
+                            org-zotero-annots-port)
+                    request-data)))
+    (if (and response (eq (plist-get response :success) t))
+        (plist-get response :citekey)
+      (user-error "No item selected or picker failed: %s"
+                  (or (plist-get response :error) "unknown error")))))
+
 (defun org-zotero-annots--bbt-select-ref ()
   "Select a citation key using Better BibTeX search.
-Provides incremental search with completion."
+Provides incremental search with completion.
+If input is empty, opens Zotero's native item picker instead."
   (let* ((items (org-zotero-annots--bbt-search ""))
          (candidates (mapcar (lambda (item)
                                (cons (org-zotero-annots--bbt-format-candidate item)
                                      (plist-get item :citekey)))
-                             items)))
-    (if candidates
-        (let ((selection (completing-read "Select reference: " candidates nil t)))
-          (cdr (assoc selection candidates)))
+                             items))
+         ;; Add option to open Zotero picker
+         (candidates-with-picker (cons '("[Open Zotero picker...]" . :picker) candidates)))
+    (if candidates-with-picker
+        (let ((selection (completing-read "Select reference (or open picker): "
+                                          candidates-with-picker nil t)))
+          (let ((result (cdr (assoc selection candidates-with-picker))))
+            (if (eq result :picker)
+                (org-zotero-annots--zotero-picker)
+              result)))
       (user-error "No items found in Better BibTeX. Is Zotero running?"))))
 
 ;;; Internal Functions - Citation Key Selection

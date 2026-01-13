@@ -299,6 +299,125 @@ function LibrariesEndpoint() {
   };
 }
 
+/**
+ * HTTP endpoint handler for /export-org/picker
+ * Opens Zotero's item picker and returns selected item's citekey
+ */
+function PickerEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["GET", "POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    try {
+      // Parse optional libraryID
+      let libraryID: number | undefined;
+      if (data && typeof data === "object") {
+        const dataObj = data as Record<string, unknown>;
+        if (typeof dataObj.libraryID === "number") {
+          libraryID = dataObj.libraryID;
+        }
+      }
+
+      // Get the main window
+      const mainWindow = Zotero.getMainWindow();
+      if (!mainWindow) {
+        sendResponseCallback(500, "application/json", JSON.stringify({
+          success: false,
+          error: "Zotero main window not available",
+        }));
+        return;
+      }
+
+      // Focus Zotero window
+      mainWindow.focus();
+
+      // Use Zotero's item selection dialog
+      const io = {
+        singleSelection: true,
+        dataOut: null as { id: number } | null,
+        libraryID: libraryID,
+      };
+
+      // Open the item selector dialog
+      (mainWindow as unknown as { openDialog: (url: string, name: string, features: string, io: unknown) => Window }).openDialog(
+        "chrome://zotero/content/selectItemsDialog.xhtml",
+        "",
+        "chrome,dialog=no,modal,centerscreen,resizable=yes",
+        io
+      );
+
+      // Get the selected item
+      if (io.dataOut && io.dataOut.id) {
+        const item = await (Zotero as unknown as {
+          Items: { getAsync: (id: number) => Promise<Zotero.Item> }
+        }).Items.getAsync(io.dataOut.id);
+
+        if (item) {
+          // Get citekey from BBT or Extra field
+          let citekey: string | null = null;
+
+          // Try BBT
+          try {
+            const bbt = (Zotero as Record<string, unknown>).BetterBibTeX as Record<string, unknown> | undefined;
+            if (bbt?.KeyManager) {
+              const km = bbt.KeyManager as { get: (key: string) => { citekey?: string } | null };
+              const result = km.get(item.key);
+              if (result?.citekey) {
+                citekey = result.citekey;
+              }
+            }
+          } catch {
+            // BBT not available
+          }
+
+          // Fall back to Extra field
+          if (!citekey) {
+            try {
+              const extra = item.getField("extra") as string;
+              const match = extra?.match(/Citation Key:\s*(.+)/i);
+              if (match) {
+                citekey = match[1].trim();
+              }
+            } catch {
+              // No citekey in Extra
+            }
+          }
+
+          if (citekey) {
+            sendResponseCallback(200, "application/json", JSON.stringify({
+              success: true,
+              citekey,
+              title: item.getField("title"),
+              itemKey: item.key,
+            }));
+            return;
+          }
+        }
+      }
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: false,
+        error: "No item selected or item has no citation key",
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error in picker: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
 export class ApiEndpoints {
   /**
    * Register HTTP API endpoints with Zotero's server.
@@ -306,6 +425,7 @@ export class ApiEndpoints {
   static register(): void {
     Zotero.Server.Endpoints["/export-org/citekey"] = CitekeyEndpoint;
     Zotero.Server.Endpoints["/export-org/libraries"] = LibrariesEndpoint;
-    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries");
+    Zotero.Server.Endpoints["/export-org/picker"] = PickerEndpoint;
+    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker");
   }
 }
