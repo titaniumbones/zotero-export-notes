@@ -1,13 +1,198 @@
 /**
- * HTTP API endpoint for exporting annotations via citation key.
+ * Zotero Export Org Notes - HTTP API Reference
+ * ============================================
  *
- * Endpoint: POST http://localhost:<port>/export-org/citekey
- * Body: {"key": "<citekey>", "libraryID": <optional-number>}
+ * This plugin exposes HTTP endpoints for programmatic access to Zotero annotations.
+ * Base URL: http://localhost:<port> (default port: 23119, dev: 23124)
  *
- * Response: JSON with org-mode formatted annotations
+ * ## Available Endpoints
  *
- * Note: GET requests with query parameters are not supported due to
- * Zotero server limitations. Use POST with JSON body instead.
+ * ### 1. POST /export-org/citekey - Export annotations by citation key
+ * Retrieves annotations for items by Better BibTeX citation key.
+ *
+ * Request (single item):
+ *   {"key": "smith2020", "libraryID": 1, "format": "md"}
+ *
+ * Request (batch):
+ *   {"keys": ["smith2020", "jones2021"], "libraryID": 1, "format": "org"}
+ *
+ * Parameters:
+ *   - key (string): Single citation key
+ *   - keys (string[]): Array of citation keys for batch export
+ *   - libraryID (number, optional): Library ID (default: user library)
+ *   - format ("org"|"md", optional): Output format (default: "md")
+ *
+ * Response:
+ *   {
+ *     "success": true,
+ *     "citekey": "smith2020",
+ *     "title": "Paper Title",
+ *     "annotationCount": 15,
+ *     "format": "md",
+ *     "content": "...formatted annotations..."
+ *   }
+ *
+ * ### 2. GET/POST /export-org/libraries - List available libraries
+ * Returns all Zotero libraries (user and group).
+ *
+ * Response:
+ *   {
+ *     "success": true,
+ *     "libraries": [
+ *       {"id": 1, "name": "My Library", "type": "user"},
+ *       {"id": 2, "name": "Lab Group", "type": "group"}
+ *     ]
+ *   }
+ *
+ * ### 3. GET/POST /export-org/picker - Get selected item's citekey
+ * Returns the citation key of the currently selected item in Zotero UI.
+ * Focuses Zotero window. Requires Better BibTeX.
+ *
+ * Response:
+ *   {"success": true, "citekey": "smith2020", "itemKey": "ABC12345"}
+ *
+ * ### 4. GET/POST /export-org/collections - List collections (flat)
+ * Returns all collections in a library as a flat list.
+ *
+ * Request (optional):
+ *   {"libraryID": 1}
+ *
+ * Response:
+ *   {
+ *     "success": true,
+ *     "libraryID": 1,
+ *     "collections": [
+ *       {"key": "ABC123", "name": "Papers", "parentKey": null},
+ *       {"key": "DEF456", "name": "AI", "parentKey": "ABC123"}
+ *     ]
+ *   }
+ *
+ * ### 5. POST /export-org/collection - Export annotations from collection
+ * Exports all annotations from items in a collection.
+ *
+ * Request:
+ *   {
+ *     "collectionKey": "ABC123",
+ *     "libraryID": 1,
+ *     "recursive": true,
+ *     "format": "md"
+ *   }
+ *
+ * Parameters:
+ *   - collectionKey (string): Collection key
+ *   - libraryID (number, optional): Library ID
+ *   - recursive (boolean, optional): Include subcollections (default: false)
+ *   - format ("org"|"md", optional): Output format (default: "md")
+ *
+ * Response:
+ *   {
+ *     "success": true,
+ *     "collectionName": "AI Papers",
+ *     "collectionKey": "ABC123",
+ *     "recursive": true,
+ *     "itemCount": 5,
+ *     "totalAnnotations": 42,
+ *     "format": "md",
+ *     "content": "...formatted annotations...",
+ *     "items": [{"title": "Paper 1", "annotationCount": 10}, ...]
+ *   }
+ *
+ * ### 6. GET /export-org/collection/current - Get current UI selection
+ * Returns the currently selected library and collection in Zotero's UI.
+ *
+ * Response (collection selected):
+ *   {
+ *     "libraryID": 1,
+ *     "libraryName": "My Library",
+ *     "libraryType": "user",
+ *     "collection": {
+ *       "key": "ABC123",
+ *       "name": "AI Papers",
+ *       "parentKey": "XYZ789"
+ *     }
+ *   }
+ *
+ * Response (library root selected):
+ *   {
+ *     "libraryID": 1,
+ *     "libraryName": "My Library",
+ *     "libraryType": "user",
+ *     "collection": null
+ *   }
+ *
+ * ### 7. POST /export-org/collection/select - Select library/collection in UI
+ * Programmatically selects a library or collection in Zotero's collections pane.
+ *
+ * Request (select collection):
+ *   {"libraryID": 1, "collectionKey": "ABC123"}
+ *
+ * Request (select library root):
+ *   {"libraryID": 1, "collectionKey": null}
+ *
+ * Parameters:
+ *   - libraryID (number, required): Target library ID
+ *   - collectionKey (string|null): Collection key, or null for library root
+ *
+ * Response:
+ *   {
+ *     "success": true,
+ *     "selected": {
+ *       "libraryID": 1,
+ *       "collectionKey": "ABC123",
+ *       "collectionName": "AI Papers"
+ *     }
+ *   }
+ *
+ * ### 8. GET /export-org/collections/list - List all collections (hierarchical)
+ * Returns all libraries with their collections as a nested tree structure.
+ *
+ * Response:
+ *   {
+ *     "libraries": [
+ *       {
+ *         "id": 1,
+ *         "name": "My Library",
+ *         "type": "user",
+ *         "collections": [
+ *           {
+ *             "key": "ABC123",
+ *             "name": "Research",
+ *             "parentKey": null,
+ *             "children": [
+ *               {
+ *                 "key": "DEF456",
+ *                 "name": "AI Papers",
+ *                 "parentKey": "ABC123",
+ *                 "children": []
+ *               }
+ *             ]
+ *           }
+ *         ]
+ *       },
+ *       {
+ *         "id": 5,
+ *         "name": "Lab Group",
+ *         "type": "group",
+ *         "collections": [...]
+ *       }
+ *     ]
+ *   }
+ *
+ * ## Output Formats
+ *
+ * - "md" (default): Markdown with blockquotes for highlights, hashtags for tags
+ * - "org": Org-mode format with properties drawer, Zotero links
+ *
+ * ## Zotero Links
+ *
+ * Generated links use Zotero protocols:
+ * - PDF: zotero://open-pdf/library/items/KEY?page=N&annotation=ANNOT_KEY
+ * - EPUB: zotero://open-epub/library/items/KEY?annotation=ANNOT_KEY
+ *
+ * ## Error Responses
+ *
+ * All endpoints return JSON with "success": false and "error" message on failure.
+ * HTTP status codes: 400 (bad request), 404 (not found), 500 (server error)
  */
 
 import { Exporter, ExportFormat } from "./exporter";
@@ -695,6 +880,262 @@ function CollectionEndpoint() {
   };
 }
 
+/**
+ * HTTP endpoint handler for /export-org/collection/current
+ * Returns the currently selected library and collection in Zotero's UI.
+ */
+function CollectionCurrentEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["GET"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    _data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    try {
+      const zp = (Zotero as unknown as {
+        getActiveZoteroPane: () => {
+          getSelectedLibraryID: () => number;
+          getSelectedCollection: () => { key: string; name: string; parentKey: string | null } | null;
+        };
+      }).getActiveZoteroPane();
+
+      const libraryID = zp.getSelectedLibraryID();
+      const library = (Zotero as unknown as {
+        Libraries: {
+          get: (id: number) => { name: string; libraryType: string };
+        };
+      }).Libraries.get(libraryID);
+
+      const collection = zp.getSelectedCollection();
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        libraryID,
+        libraryName: library.name,
+        libraryType: library.libraryType,
+        collection: collection ? {
+          key: collection.key,
+          name: collection.name,
+          parentKey: collection.parentKey || null,
+        } : null,
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error getting current selection: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
+/**
+ * HTTP endpoint handler for /export-org/collection/select
+ * Selects a library or collection in Zotero's UI.
+ * Accepts POST with JSON body: {"libraryID": <number>, "collectionKey": "<string>" | null}
+ */
+function CollectionSelectEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    let libraryID: number | undefined;
+    let collectionKey: string | null | undefined;
+
+    if (data && typeof data === "object") {
+      const dataObj = data as Record<string, unknown>;
+      if (typeof dataObj.libraryID === "number") {
+        libraryID = dataObj.libraryID;
+      }
+      if (typeof dataObj.collectionKey === "string") {
+        collectionKey = dataObj.collectionKey;
+      } else if (dataObj.collectionKey === null) {
+        collectionKey = null;
+      }
+    }
+
+    if (libraryID === undefined) {
+      sendResponseCallback(400, "application/json", JSON.stringify({
+        success: false,
+        error: "Missing 'libraryID' parameter",
+      }));
+      return;
+    }
+
+    try {
+      const zp = (Zotero as unknown as {
+        getActiveZoteroPane: () => {
+          collectionsView: {
+            selectLibrary: (libraryID: number) => Promise<void>;
+            selectCollection: (collectionID: number) => Promise<void>;
+          };
+        };
+      }).getActiveZoteroPane();
+
+      if (!collectionKey) {
+        // Select library root
+        await zp.collectionsView.selectLibrary(libraryID);
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: true,
+          selected: {
+            libraryID,
+            collectionKey: null,
+            collectionName: null,
+          },
+        }));
+        return;
+      }
+
+      // Select specific collection
+      const ZoteroCollections = (Zotero as unknown as {
+        Collections: {
+          getByLibraryAndKeyAsync: (libraryID: number, key: string) => Promise<{
+            id: number;
+            key: string;
+            name: string;
+          } | null>;
+        };
+      }).Collections;
+
+      const collection = await ZoteroCollections.getByLibraryAndKeyAsync(libraryID, collectionKey);
+
+      if (!collection) {
+        sendResponseCallback(404, "application/json", JSON.stringify({
+          success: false,
+          error: "Collection not found",
+        }));
+        return;
+      }
+
+      await zp.collectionsView.selectCollection(collection.id);
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: true,
+        selected: {
+          libraryID,
+          collectionKey: collection.key,
+          collectionName: collection.name,
+        },
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error selecting collection: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
+/**
+ * Build a hierarchical tree of collections.
+ */
+interface CollectionTreeNode {
+  key: string;
+  name: string;
+  parentKey: string | null;
+  children: CollectionTreeNode[];
+}
+
+function buildCollectionTree(
+  collections: Array<{ key: string; name: string; parentKey: string | null }>,
+  parentKey: string | null = null,
+): CollectionTreeNode[] {
+  return collections
+    .filter((c) => (c.parentKey || null) === parentKey)
+    .map((c) => ({
+      key: c.key,
+      name: c.name,
+      parentKey: c.parentKey || null,
+      children: buildCollectionTree(collections, c.key),
+    }));
+}
+
+/**
+ * HTTP endpoint handler for /export-org/collections/list
+ * Returns all libraries and their collections as a hierarchical structure.
+ */
+function CollectionsListHierarchicalEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["GET"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    _data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    try {
+      const ZoteroLibraries = (Zotero as unknown as {
+        Libraries: {
+          getAll: () => Array<{ libraryID: number; name: string; libraryType: string }>;
+        };
+      }).Libraries;
+
+      const ZoteroCollections = (Zotero as unknown as {
+        Collections: {
+          getByLibrary: (libraryID: number) => Array<{
+            key: string;
+            name: string;
+            parentKey: string | null;
+            deleted: boolean;
+            version: number;
+            synced: boolean;
+          }>;
+        };
+      }).Collections;
+
+      const libraries = ZoteroLibraries.getAll();
+
+      // Include user and group libraries
+      const filteredLibraries = libraries.filter(
+        (lib) => lib.libraryType === "user" || lib.libraryType === "group"
+      );
+
+      const result = {
+        libraries: filteredLibraries.map((lib) => {
+          const collections = ZoteroCollections.getByLibrary(lib.libraryID);
+          // Filter out deleted collections and log for debugging
+          const visibleCollections = collections.filter((c) => !c.deleted);
+          return {
+            id: lib.libraryID,
+            name: lib.name || (lib.libraryType === "user" ? "My Library" : `Library ${lib.libraryID}`),
+            type: lib.libraryType,
+            collections: buildCollectionTree(visibleCollections),
+          };
+        }),
+      };
+
+      sendResponseCallback(200, "application/json", JSON.stringify(result));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error listing collections: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
 export class ApiEndpoints {
   /**
    * Register HTTP API endpoints with Zotero's server.
@@ -705,6 +1146,9 @@ export class ApiEndpoints {
     Zotero.Server.Endpoints["/export-org/picker"] = PickerEndpoint;
     Zotero.Server.Endpoints["/export-org/collections"] = CollectionsListEndpoint;
     Zotero.Server.Endpoints["/export-org/collection"] = CollectionEndpoint;
-    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker, /export-org/collections, /export-org/collection");
+    Zotero.Server.Endpoints["/export-org/collection/current"] = CollectionCurrentEndpoint;
+    Zotero.Server.Endpoints["/export-org/collection/select"] = CollectionSelectEndpoint;
+    Zotero.Server.Endpoints["/export-org/collections/list"] = CollectionsListHierarchicalEndpoint;
+    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker, /export-org/collections, /export-org/collection, /export-org/collection/current, /export-org/collection/select, /export-org/collections/list");
   }
 }
