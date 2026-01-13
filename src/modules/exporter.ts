@@ -8,9 +8,14 @@ import {
 } from "./annotationFormatter";
 import { MetadataFormatter } from "./metadataFormatter";
 
+interface GenerateResult {
+  content: string;
+  annotationCount: number;
+}
+
 export class Exporter {
   /**
-   * Export annotations from multiple items.
+   * Export annotations from multiple items to files.
    */
   static async exportItems(items: Zotero.Item[]): Promise<void> {
     for (const item of items) {
@@ -19,9 +24,86 @@ export class Exporter {
   }
 
   /**
+   * Copy annotations from multiple items to clipboard.
+   */
+  static async copyItems(items: Zotero.Item[]): Promise<void> {
+    let allContent = "";
+    let totalAnnotations = 0;
+
+    for (const item of items) {
+      const result = await this.generateOrgContent(item);
+      if (result) {
+        allContent += result.content;
+        totalAnnotations += result.annotationCount;
+        // Add separator between items if multiple
+        if (items.length > 1) {
+          allContent += "\n";
+        }
+      }
+    }
+
+    if (totalAnnotations === 0) {
+      new ztoolkit.ProgressWindow(addon.data.config.addonName)
+        .createLine({
+          text: "No annotations found",
+          type: "fail",
+        })
+        .show();
+      return;
+    }
+
+    // Copy to clipboard
+    new ztoolkit.Clipboard()
+      .addText(allContent, "text/plain")
+      .copy();
+
+    new ztoolkit.ProgressWindow(addon.data.config.addonName)
+      .createLine({
+        text: `Copied ${totalAnnotations} annotations to clipboard`,
+        type: "success",
+      })
+      .show();
+  }
+
+  /**
    * Export annotations from a single item to an org file.
    */
   static async exportItem(item: Zotero.Item): Promise<void> {
+    const result = await this.generateOrgContent(item);
+
+    if (!result || result.annotationCount === 0) {
+      return; // Error already shown by generateOrgContent
+    }
+
+    // Get parent item for filename
+    const parentItem = item.isRegularItem()
+      ? item
+      : item.parentItemID
+        ? await Zotero.Items.getAsync(item.parentItemID)
+        : null;
+
+    // Prompt for save location
+    const defaultFilename = this.generateFilename(parentItem || item);
+    const savePath = await this.promptSaveLocation(defaultFilename);
+
+    if (savePath) {
+      await Zotero.File.putContentsAsync(savePath, result.content);
+      new ztoolkit.ProgressWindow(addon.data.config.addonName)
+        .createLine({
+          text: `Exported ${result.annotationCount} annotations to ${savePath}`,
+          type: "success",
+        })
+        .show();
+    }
+  }
+
+  /**
+   * Generate org-mode content for an item's annotations.
+   * Returns null if no PDF attachments found.
+   */
+  static async generateOrgContent(
+    item: Zotero.Item,
+  ): Promise<GenerateResult | null> {
     // Get PDF attachment(s)
     const attachments: Zotero.Item[] = [];
 
@@ -44,7 +126,7 @@ export class Exporter {
           type: "fail",
         })
         .show();
-      return;
+      return null;
     }
 
     // Generate org content
@@ -65,7 +147,8 @@ export class Exporter {
 
     // Process each attachment
     for (const attachment of attachments) {
-      const annotations = attachment.getAnnotations() as unknown as ZoteroAnnotation[];
+      const annotations =
+        attachment.getAnnotations() as unknown as ZoteroAnnotation[];
       if (!annotations || annotations.length === 0) continue;
 
       totalAnnotations += annotations.length;
@@ -99,22 +182,13 @@ export class Exporter {
           type: "fail",
         })
         .show();
-      return;
+      return null;
     }
 
-    // Prompt for save location
-    const defaultFilename = this.generateFilename(parentItem || item);
-    const savePath = await this.promptSaveLocation(defaultFilename);
-
-    if (savePath) {
-      await Zotero.File.putContentsAsync(savePath, orgContent);
-      new ztoolkit.ProgressWindow(addon.data.config.addonName)
-        .createLine({
-          text: `Exported ${totalAnnotations} annotations to ${savePath}`,
-          type: "success",
-        })
-        .show();
-    }
+    return {
+      content: orgContent,
+      annotationCount: totalAnnotations,
+    };
   }
 
   private static generateFilename(item: Zotero.Item): string {

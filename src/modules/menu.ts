@@ -14,23 +14,43 @@ function getZoteroPane(): _ZoteroTypes.ZoteroPane | null {
 
 export class MenuFactory {
   /**
-   * Register the right-click context menu item for library items.
+   * Register the right-click context menu items for library items.
    */
   static registerItemContextMenu(): void {
     const menuIcon = `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`;
 
+    // Submenu with both options
     ztoolkit.Menu.register("item", {
-      tag: "menuitem",
+      tag: "menu",
       id: "zotero-export-org-notes-menu",
       label: "Export Annotations to Org",
       icon: menuIcon,
-      commandListener: async () => {
-        const zp = getZoteroPane();
-        const items = zp?.getSelectedItems();
-        if (items && items.length > 0) {
-          await Exporter.exportItems(items);
-        }
-      },
+      children: [
+        {
+          tag: "menuitem",
+          id: "zotero-export-org-notes-file",
+          label: "Save to File...",
+          commandListener: async () => {
+            const zp = getZoteroPane();
+            const items = zp?.getSelectedItems();
+            if (items && items.length > 0) {
+              await Exporter.exportItems(items);
+            }
+          },
+        },
+        {
+          tag: "menuitem",
+          id: "zotero-export-org-notes-clipboard",
+          label: "Copy to Clipboard",
+          commandListener: async () => {
+            const zp = getZoteroPane();
+            const items = zp?.getSelectedItems();
+            if (items && items.length > 0) {
+              await Exporter.copyItems(items);
+            }
+          },
+        },
+      ],
       getVisibility: () => {
         // Show only when items with potential PDF attachments are selected
         const zp = getZoteroPane();
