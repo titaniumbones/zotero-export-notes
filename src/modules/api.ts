@@ -34,83 +34,182 @@ interface ApiResponse {
 
 /**
  * Find a Zotero item by its citation key.
- * Checks Better BibTeX first, then falls back to Extra field.
+ * Uses Better BibTeX JSON-RPC API, then falls back to Extra field search.
  */
 async function findItemByCitekey(citekey: string): Promise<Zotero.Item | null> {
-  // Try Better BibTeX API first
-  try {
-    const bbt = (Zotero as Record<string, unknown>).BetterBibTeX as
-      | { KeyManager?: { get: (key: string) => { itemID?: number } | null } }
-      | undefined;
+  ztoolkit.log("Looking up citekey:", citekey);
 
-    if (bbt?.KeyManager) {
-      const result = bbt.KeyManager.get(citekey);
-      if (result?.itemID) {
-        return (await (
-          Zotero as unknown as {
-            Items: { getAsync: (id: number) => Promise<Zotero.Item> };
+  // Try Better BibTeX JSON-RPC API
+  try {
+    ztoolkit.log("Trying BBT JSON-RPC API...");
+
+    // Get the server port from Zotero preferences
+    const port = (Zotero as unknown as { Prefs: { get: (key: string) => number } }).Prefs.get("httpServer.port") || 23119;
+    const url = `http://localhost:${port}/better-bibtex/json-rpc`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "item.search",
+        params: [citekey],
+        id: 1,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json() as { result?: Array<{ id?: string; itemKey?: string; libraryID?: number }> };
+      ztoolkit.log("BBT JSON-RPC response:", data);
+
+      if (data.result && data.result.length > 0) {
+        const bbtItem = data.result[0];
+
+        // Extract item key from the id URL (format: "http://zotero.org/users/XX/items/ITEMKEY")
+        let itemKey = bbtItem.itemKey;
+        if (!itemKey && bbtItem.id) {
+          const match = bbtItem.id.match(/\/items\/([A-Z0-9]+)$/);
+          if (match) {
+            itemKey = match[1];
           }
-        ).Items.getAsync(result.itemID)) as Zotero.Item;
+        }
+
+        if (itemKey) {
+          ztoolkit.log("Found item key:", itemKey);
+          const libraryID = bbtItem.libraryID ?? Zotero.Libraries.userLibraryID;
+          const item = await (Zotero as unknown as { Items: { getByLibraryAndKeyAsync: (lib: number, key: string) => Promise<Zotero.Item | null> } })
+            .Items.getByLibraryAndKeyAsync(libraryID, itemKey);
+          if (item) {
+            ztoolkit.log("Found item via BBT:", item.getField("title"));
+            return item;
+          }
+        }
       }
     }
-  } catch {
-    // BBT not available, fall back to Extra field search
+  } catch (e) {
+    ztoolkit.log("BBT JSON-RPC lookup failed:", e);
   }
 
   // Fall back to searching Extra field for "Citation Key: xxx"
-  const libraryID = Zotero.Libraries.userLibraryID;
-  const items = Zotero.Items.getAll(libraryID);
+  try {
+    ztoolkit.log("Trying Extra field search...");
+    const s = new (Zotero as unknown as { Search: new () => ZoteroSearch }).Search();
+    s.addCondition("extra", "contains", citekey);
+    const ids = await s.search();
+    ztoolkit.log("Search returned ids:", ids);
 
-  for (const item of items) {
-    if (!item.isRegularItem()) continue;
+    if (ids && ids.length > 0) {
+      const items = await (Zotero as unknown as { Items: { getAsync: (ids: number[]) => Promise<Zotero.Item[]> } }).Items.getAsync(ids);
 
-    try {
-      const extra = item.getField("extra") as string;
-      if (extra) {
-        const match = extra.match(/Citation Key:\s*(.+)/i);
-        if (match && match[1].trim() === citekey) {
-          return item;
+      // Verify exact match
+      for (const item of items) {
+        if (!item.isRegularItem()) continue;
+        try {
+          const extra = item.getField("extra") as string;
+          if (extra) {
+            // Check for Citation Key: pattern or just the citekey itself
+            const match = extra.match(/Citation Key:\s*(.+)/i);
+            if (match && match[1].trim() === citekey) {
+              return item;
+            }
+            // Also check if citekey appears directly
+            if (extra.includes(citekey)) {
+              return item;
+            }
+          }
+        } catch {
+          // Skip
         }
       }
-    } catch {
-      // Skip items that can't be read
     }
+  } catch (e) {
+    ztoolkit.log("Extra field search failed:", e);
   }
 
   return null;
 }
 
+// Type for Zotero Search
+interface ZoteroSearch {
+  addCondition: (field: string, operator: string, value: string) => void;
+  search: () => Promise<number[]>;
+}
+
 /**
- * HTTP endpoint handler for /export-org/citekey/<citekey>
+ * HTTP endpoint handler for /export-org/citekey?key=<citekey>
  */
 function CitekeyEndpoint() {
   // @ts-expect-error - Zotero endpoint pattern
-  this.supportedMethods = ["GET"];
+  this.supportedMethods = ["GET", "POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
 
   // @ts-expect-error - Zotero endpoint pattern
   this.init = async function (
-    _data: unknown,
+    data: unknown,
     sendResponseCallback: (
       status: number,
       contentType?: string,
       body?: string,
     ) => void,
   ) {
-    // Parse citekey from URL path
-    // URL format: /export-org/citekey/<citekey>
-    const url = (this as unknown as { pathname?: string }).pathname || "";
-    const match = url.match(/\/export-org\/citekey\/(.+)/);
+    // Debug: log what we receive
+    const self = this as unknown as Record<string, unknown>;
+    ztoolkit.log("API endpoint called. data:", data, "this:", Object.keys(self));
 
-    if (!match || !match[1]) {
+    // Parse citekey from query parameter
+    // URL format: /export-org/citekey?key=<citekey>
+    let citekey: string | undefined;
+
+    // For GET requests, data is the query string (e.g., "key=value&foo=bar")
+    if (typeof data === "string" && data) {
+      const match = data.match(/key=([^&]+)/);
+      if (match) {
+        citekey = decodeURIComponent(match[1]);
+      }
+    }
+
+    // Try data as object with query property
+    if (!citekey && data && typeof data === "object") {
+      const dataObj = data as Record<string, unknown>;
+      if (typeof dataObj.key === "string") {
+        citekey = dataObj.key;
+      } else if (dataObj.query && typeof dataObj.query === "object") {
+        const query = dataObj.query as Record<string, string>;
+        citekey = query.key;
+      }
+    }
+
+    // Check 'this' context for URL/query info
+    if (!citekey) {
+      if (typeof self.query === "string") {
+        const match = self.query.match(/key=([^&]+)/);
+        if (match) {
+          citekey = decodeURIComponent(match[1] as string);
+        }
+      } else if (self.query && typeof self.query === "object") {
+        const query = self.query as Record<string, string>;
+        citekey = query.key;
+      }
+      if (!citekey && typeof self.pathname === "string") {
+        // Try to extract from pathname if passed as path parameter
+        const match = (self.pathname as string).match(/\/export-org\/citekey\/(.+)/);
+        if (match) {
+          citekey = decodeURIComponent(match[1]);
+        }
+      }
+    }
+
+    ztoolkit.log("Parsed citekey:", citekey);
+
+    if (!citekey) {
       const response: ApiResponse = {
         success: false,
-        error: "Missing citekey in URL. Use: /export-org/citekey/<citekey>",
+        error: "Missing 'key' parameter. Use: /export-org/citekey?key=<citekey>",
       };
       sendResponseCallback(400, "application/json", JSON.stringify(response));
       return;
     }
-
-    const citekey = decodeURIComponent(match[1]);
 
     try {
       // Find item by citekey

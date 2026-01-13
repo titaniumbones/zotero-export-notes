@@ -102,16 +102,20 @@ Right-click on items with PDF attachments to access:
 
 ### HTTP API Endpoint
 
-The plugin exposes an HTTP API endpoint on Zotero's built-in server (port 23119).
+The plugin exposes an HTTP API endpoint on Zotero's built-in server (default port 23119, check Zotero preferences).
 
 **Endpoint:**
 ```
-GET http://localhost:23119/export-org/citekey/<citekey>
+POST http://localhost:<port>/export-org/citekey
+Content-Type: application/json
+{"key": "<citekey>"}
 ```
 
 **Example:**
 ```bash
-curl http://localhost:23119/export-org/citekey/smith2023deep
+curl -X POST "http://localhost:23119/export-org/citekey" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"smith2023deep"}'
 ```
 
 **Response (JSON):**
@@ -134,8 +138,10 @@ curl http://localhost:23119/export-org/citekey/smith2023deep
 ```
 
 **Notes:**
-- Requires Better BibTeX for citation keys, or use "Citation Key: xxx" in Extra field
+- Uses Better BibTeX JSON-RPC API for citekey lookup (recommended)
+- Falls back to searching Extra field for "Citation Key: xxx"
 - Only accessible from localhost (127.0.0.1)
+- Check Zotero > Preferences > Advanced > Config Editor for `extensions.zotero.httpServer.port`
 
 ## Testing Strategy
 
