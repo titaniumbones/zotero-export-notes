@@ -247,12 +247,65 @@ function CitekeyEndpoint() {
   };
 }
 
+/**
+ * HTTP endpoint handler for /export-org/libraries
+ * Returns list of available Zotero libraries
+ */
+function LibrariesEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["GET", "POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    _data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    try {
+      const libraries: Array<{ id: number; name: string; type: string }> = [];
+
+      // Get all libraries using Zotero API
+      const ZoteroLibraries = (Zotero as unknown as {
+        Libraries: {
+          getAll: () => Array<{ libraryID: number; name: string; libraryType: string }>;
+        };
+      }).Libraries;
+
+      const allLibraries = ZoteroLibraries.getAll();
+
+      for (const lib of allLibraries) {
+        libraries.push({
+          id: lib.libraryID,
+          name: lib.name || (lib.libraryType === "user" ? "My Library" : `Library ${lib.libraryID}`),
+          type: lib.libraryType,
+        });
+      }
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: true,
+        libraries,
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error listing libraries: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
 export class ApiEndpoints {
   /**
    * Register HTTP API endpoints with Zotero's server.
    */
   static register(): void {
     Zotero.Server.Endpoints["/export-org/citekey"] = CitekeyEndpoint;
-    ztoolkit.log("Registered API endpoint: POST /export-org/citekey");
+    Zotero.Server.Endpoints["/export-org/libraries"] = LibrariesEndpoint;
+    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries");
   }
 }

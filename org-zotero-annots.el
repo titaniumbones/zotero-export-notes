@@ -283,7 +283,48 @@ Otherwise, insert at end of current subtree."
       ;; Report error
       (user-error "Failed to fetch annotations: %s" (plist-get result :error)))))
 
+;;; Internal Functions - Library Selection
+
+(defun org-zotero-annots--fetch-libraries ()
+  "Fetch list of available Zotero libraries.
+Returns list of plists with :id, :name, :type keys."
+  (let ((response (org-zotero-annots--http-post
+                   (format "http://localhost:%d/export-org/libraries"
+                           org-zotero-annots-port)
+                   nil)))
+    (when (and response (eq (plist-get response :success) t))
+      (mapcar (lambda (lib)
+                (list :id (plist-get lib :id)
+                      :name (plist-get lib :name)
+                      :type (plist-get lib :type)))
+              (plist-get response :libraries)))))
+
+(defun org-zotero-annots--select-library ()
+  "Interactively select a Zotero library.
+Returns the library ID as an integer."
+  (let* ((libraries (org-zotero-annots--fetch-libraries))
+         (candidates (mapcar (lambda (lib)
+                               (cons (format "%s (%s, id: %d)"
+                                             (plist-get lib :name)
+                                             (plist-get lib :type)
+                                             (plist-get lib :id))
+                                     (plist-get lib :id)))
+                             libraries)))
+    (if candidates
+        (let ((selection (completing-read "Select library: " candidates nil t)))
+          (cdr (assoc selection candidates)))
+      (user-error "No libraries found. Is Zotero running?"))))
+
 ;;; Interactive Commands
+
+;;;###autoload
+(defun org-zotero-annots-set-library ()
+  "Set the Zotero library ID for the current buffer.
+Queries Zotero for available libraries and lets you choose one."
+  (interactive)
+  (let ((lib-id (org-zotero-annots--select-library)))
+    (setq-local org-zotero-annots-library-id lib-id)
+    (message "Set library ID to %d for this buffer" lib-id)))
 
 ;;;###autoload
 (defun org-zotero-annots-insert (citekey)
