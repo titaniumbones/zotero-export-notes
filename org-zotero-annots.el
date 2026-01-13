@@ -52,13 +52,13 @@ Check Zotero preferences (Advanced > Config Editor) for
 
 (defcustom org-zotero-annots-citekey-source 'auto
   "Source for citation key selection.
-- `auto': Use citar if available, else BBT search, else manual entry
+- `auto': Use citar if available, else Zotero picker
 - `citar': Always use citar (requires citar package and bibliography)
-- `bbt': Always use Better BibTeX JSON-RPC search
+- `zotero': Use Zotero selection or manual entry
 - `manual': Always prompt for manual text entry"
   :type '(choice (const :tag "Auto-detect best available" auto)
                  (const :tag "Citar (requires setup)" citar)
-                 (const :tag "Better BibTeX search" bbt)
+                 (const :tag "Zotero selection" zotero)
                  (const :tag "Manual entry" manual))
   :group 'org-zotero-annots)
 
@@ -124,54 +124,15 @@ Returns the value as a string, or nil if not found."
               (string-to-number val)
             val))))))
 
-;;; Internal Functions - Better BibTeX Search
+;;; Internal Functions - Zotero Integration
 
-(defun org-zotero-annots--bbt-available-p ()
-  "Check if Better BibTeX JSON-RPC is available."
+(defun org-zotero-annots--zotero-available-p ()
+  "Check if Zotero is available by trying the libraries endpoint."
   (let ((response (org-zotero-annots--http-post
-                   (format "http://localhost:%d/better-bibtex/json-rpc"
+                   (format "http://localhost:%d/export-org/libraries"
                            org-zotero-annots-port)
-                   '((jsonrpc . "2.0")
-                     (method . "item.search")
-                     (params . [""])
-                     (id . 1)))))
-    (and response (plist-get response :result))))
-
-(defun org-zotero-annots--bbt-search (query)
-  "Search Better BibTeX for items matching QUERY.
-Returns list of items with :citekey, :title, :author properties."
-  (let* ((library-id (org-zotero-annots--get-library-id))
-         (params (if library-id
-                     (vector query library-id)
-                   (vector query)))
-         (response (org-zotero-annots--http-post
-                    (format "http://localhost:%d/better-bibtex/json-rpc"
-                            org-zotero-annots-port)
-                    `((jsonrpc . "2.0")
-                      (method . "item.search")
-                      (params . ,params)
-                      (id . 1)))))
-    (when response
-      (let ((items (plist-get response :result)))
-        (mapcar (lambda (item)
-                  (list :citekey (plist-get item :citekey)
-                        :title (or (plist-get item :title) "")
-                        :author (or (plist-get item :author) "")))
-                items)))))
-
-(defun org-zotero-annots--bbt-format-candidate (item)
-  "Format ITEM for completion display."
-  (let ((citekey (plist-get item :citekey))
-        (title (plist-get item :title))
-        (author (plist-get item :author)))
-    (format "%s - %s (%s)"
-            citekey
-            (if (> (length title) 50)
-                (concat (substring title 0 47) "...")
-              title)
-            (if (> (length author) 30)
-                (concat (substring author 0 27) "...")
-              author))))
+                   nil)))
+    (and response (eq (plist-get response :success) t))))
 
 (defun org-zotero-annots--zotero-picker ()
   "Get citekey of currently selected item in Zotero.
@@ -183,38 +144,28 @@ Focuses Zotero window and prompts user to select an item if needed."
     (if (and response (eq (plist-get response :success) t))
         (plist-get response :citekey)
       ;; No item selected - prompt user to select one
-      (when (y-or-n-p "No item selected in Zotero. Select an item and try again? ")
-        (message "Zotero window focused. Select an item, then press any key...")
-        (read-event)
-        ;; Try again
-        (let ((retry-response (org-zotero-annots--http-post
-                               (format "http://localhost:%d/export-org/picker"
-                                       org-zotero-annots-port)
-                               nil)))
-          (if (and retry-response (eq (plist-get retry-response :success) t))
-              (plist-get retry-response :citekey)
-            (user-error "Still no item selected: %s"
-                        (or (plist-get retry-response :error) "unknown error"))))))))
+      (message "Select an item in Zotero, then press any key here...")
+      (read-event)
+      ;; Try again
+      (let ((retry-response (org-zotero-annots--http-post
+                             (format "http://localhost:%d/export-org/picker"
+                                     org-zotero-annots-port)
+                             nil)))
+        (if (and retry-response (eq (plist-get retry-response :success) t))
+            (plist-get retry-response :citekey)
+          (user-error "No item selected: %s"
+                      (or (plist-get retry-response :error) "unknown error")))))))
 
 (defun org-zotero-annots--bbt-select-ref ()
-  "Select a citation key using Better BibTeX search.
-Provides incremental search with completion.
-First option uses currently selected item in Zotero."
-  (let* ((items (org-zotero-annots--bbt-search ""))
-         (candidates (mapcar (lambda (item)
-                               (cons (org-zotero-annots--bbt-format-candidate item)
-                                     (plist-get item :citekey)))
-                             items))
-         ;; Add option to use Zotero selection at the top
-         (candidates-with-picker (cons '("[Use selected item in Zotero]" . :picker) candidates)))
-    (if candidates-with-picker
-        (let ((selection (completing-read "Select reference: "
-                                          candidates-with-picker nil t)))
-          (let ((result (cdr (assoc selection candidates-with-picker))))
-            (if (eq result :picker)
-                (org-zotero-annots--zotero-picker)
-              result)))
-      (user-error "No items found in Better BibTeX. Is Zotero running?"))))
+  "Select citation key: use Zotero selection or enter manually."
+  (let ((choice (completing-read
+                 "Citation key: "
+                 '("[Use selected item in Zotero]" "[Enter citekey manually]")
+                 nil t)))
+    (pcase choice
+      ("[Use selected item in Zotero]" (org-zotero-annots--zotero-picker))
+      ("[Enter citekey manually]" (read-string "Citation key: "))
+      (_ choice))))
 
 ;;; Internal Functions - Citation Key Selection
 
@@ -225,18 +176,16 @@ First option uses currently selected item in Zotero."
     ('citar
      (if (fboundp 'citar-select-ref)
          (citar-select-ref)
-       (user-error "Citar not available. Install citar or use 'bbt or 'auto")))
-    ('bbt (org-zotero-annots--bbt-select-ref))
+       (user-error "Citar not available. Set org-zotero-annots-citekey-source to 'zotero or 'auto")))
+    ('zotero (org-zotero-annots--bbt-select-ref))
+    ('bbt (org-zotero-annots--bbt-select-ref))  ; alias for zotero
     ('auto
      (cond
-      ;; Try citar first
+      ;; Try citar first if available
       ((fboundp 'citar-select-ref)
        (citar-select-ref))
-      ;; Fall back to BBT search
-      ((org-zotero-annots--bbt-available-p)
-       (org-zotero-annots--bbt-select-ref))
-      ;; Manual entry as last resort
-      (t (read-string "Citation key: "))))))
+      ;; Fall back to Zotero picker
+      (t (org-zotero-annots--bbt-select-ref))))))
 
 ;;; Internal Functions - Fetch and Insert
 
