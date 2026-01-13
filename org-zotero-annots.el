@@ -320,11 +320,27 @@ Returns the library ID as an integer."
 ;;;###autoload
 (defun org-zotero-annots-set-library ()
   "Set the Zotero library ID for the current buffer.
-Queries Zotero for available libraries and lets you choose one."
+Queries Zotero for available libraries and lets you choose one.
+Updates #+ZOTERO_LIBRARY: keyword in the file, or adds it to front matter."
   (interactive)
   (let ((lib-id (org-zotero-annots--select-library)))
+    ;; Set buffer-local variable
     (setq-local org-zotero-annots-library-id lib-id)
-    (message "Set library ID to %d for this buffer" lib-id)))
+    ;; Update or insert the keyword in the file
+    (save-excursion
+      (goto-char (point-min))
+      (if (re-search-forward "^#\\+ZOTERO_LIBRARY:.*$" nil t)
+          ;; Update existing keyword
+          (replace-match (format "#+ZOTERO_LIBRARY: %d" lib-id))
+        ;; Insert in front matter (after other keywords, or at top)
+        (goto-char (point-min))
+        ;; Skip past existing keywords and blank lines at top
+        (while (and (not (eobp))
+                    (looking-at "^\\(#\\+\\|[ \t]*$\\)"))
+          (forward-line 1))
+        ;; Insert before first non-keyword line
+        (insert (format "#+ZOTERO_LIBRARY: %d\n" lib-id))))
+    (message "Set library ID to %d" lib-id)))
 
 ;;;###autoload
 (defun org-zotero-annots-insert (citekey)
