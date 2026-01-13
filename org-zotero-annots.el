@@ -174,31 +174,41 @@ Returns list of items with :citekey, :title, :author properties."
               author))))
 
 (defun org-zotero-annots--zotero-picker ()
-  "Open Zotero's item picker and return the selected item's citekey."
-  (let* ((library-id (org-zotero-annots--get-library-id))
-         (request-data (when library-id `((libraryID . ,library-id))))
-         (response (org-zotero-annots--http-post
-                    (format "http://localhost:%d/export-org/picker"
-                            org-zotero-annots-port)
-                    request-data)))
+  "Get citekey of currently selected item in Zotero.
+Focuses Zotero window and prompts user to select an item if needed."
+  (let ((response (org-zotero-annots--http-post
+                   (format "http://localhost:%d/export-org/picker"
+                           org-zotero-annots-port)
+                   nil)))
     (if (and response (eq (plist-get response :success) t))
         (plist-get response :citekey)
-      (user-error "No item selected or picker failed: %s"
-                  (or (plist-get response :error) "unknown error")))))
+      ;; No item selected - prompt user to select one
+      (when (y-or-n-p "No item selected in Zotero. Select an item and try again? ")
+        (message "Zotero window focused. Select an item, then press any key...")
+        (read-event)
+        ;; Try again
+        (let ((retry-response (org-zotero-annots--http-post
+                               (format "http://localhost:%d/export-org/picker"
+                                       org-zotero-annots-port)
+                               nil)))
+          (if (and retry-response (eq (plist-get retry-response :success) t))
+              (plist-get retry-response :citekey)
+            (user-error "Still no item selected: %s"
+                        (or (plist-get retry-response :error) "unknown error"))))))))
 
 (defun org-zotero-annots--bbt-select-ref ()
   "Select a citation key using Better BibTeX search.
 Provides incremental search with completion.
-If input is empty, opens Zotero's native item picker instead."
+First option uses currently selected item in Zotero."
   (let* ((items (org-zotero-annots--bbt-search ""))
          (candidates (mapcar (lambda (item)
                                (cons (org-zotero-annots--bbt-format-candidate item)
                                      (plist-get item :citekey)))
                              items))
-         ;; Add option to open Zotero picker
-         (candidates-with-picker (cons '("[Open Zotero picker...]" . :picker) candidates)))
+         ;; Add option to use Zotero selection at the top
+         (candidates-with-picker (cons '("[Use selected item in Zotero]" . :picker) candidates)))
     (if candidates-with-picker
-        (let ((selection (completing-read "Select reference (or open picker): "
+        (let ((selection (completing-read "Select reference: "
                                           candidates-with-picker nil t)))
           (let ((result (cdr (assoc selection candidates-with-picker))))
             (if (eq result :picker)

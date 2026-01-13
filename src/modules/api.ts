@@ -300,8 +300,63 @@ function LibrariesEndpoint() {
 }
 
 /**
+ * Get citekey for a Zotero item using BBT or Extra field
+ */
+async function getCitekeyForItem(item: Zotero.Item): Promise<string | null> {
+  // Try BBT KeyManager
+  try {
+    const bbt = (Zotero as Record<string, unknown>).BetterBibTeX as Record<string, unknown> | undefined;
+    if (bbt?.KeyManager) {
+      const km = bbt.KeyManager as { get: (key: string) => { citekey?: string } | null };
+      const result = km.get(item.key);
+      if (result?.citekey) {
+        return result.citekey;
+      }
+    }
+  } catch {
+    // BBT not available
+  }
+
+  // Try BBT JSON-RPC for this specific item
+  try {
+    const port = (Zotero as unknown as { Prefs: { get: (key: string) => number } }).Prefs.get("httpServer.port") || 23119;
+    const response = await fetch(`http://localhost:${port}/better-bibtex/json-rpc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "item.citationkey",
+        params: [item.id],
+        id: 1,
+      }),
+    });
+    if (response.ok) {
+      const data = await response.json() as { result?: string };
+      if (data.result) {
+        return data.result;
+      }
+    }
+  } catch {
+    // BBT JSON-RPC failed
+  }
+
+  // Fall back to Extra field
+  try {
+    const extra = item.getField("extra") as string;
+    const match = extra?.match(/Citation Key:\s*(.+)/i);
+    if (match) {
+      return match[1].trim();
+    }
+  } catch {
+    // No citekey in Extra
+  }
+
+  return null;
+}
+
+/**
  * HTTP endpoint handler for /export-org/picker
- * Opens Zotero's item picker and returns selected item's citekey
+ * Returns citekey of currently selected item in Zotero, or opens quick search
  */
 function PickerEndpoint() {
   // @ts-expect-error - Zotero endpoint pattern
@@ -311,7 +366,7 @@ function PickerEndpoint() {
 
   // @ts-expect-error - Zotero endpoint pattern
   this.init = async function (
-    data: unknown,
+    _data: unknown,
     sendResponseCallback: (
       status: number,
       contentType?: string,
@@ -319,16 +374,7 @@ function PickerEndpoint() {
     ) => void,
   ) {
     try {
-      // Parse optional libraryID
-      let libraryID: number | undefined;
-      if (data && typeof data === "object") {
-        const dataObj = data as Record<string, unknown>;
-        if (typeof dataObj.libraryID === "number") {
-          libraryID = dataObj.libraryID;
-        }
-      }
-
-      // Get the main window
+      // Get the main window and ZoteroPane
       const mainWindow = Zotero.getMainWindow();
       if (!mainWindow) {
         sendResponseCallback(500, "application/json", JSON.stringify({
@@ -341,74 +387,71 @@ function PickerEndpoint() {
       // Focus Zotero window
       mainWindow.focus();
 
-      // Use Zotero's item selection dialog
-      const io = {
-        singleSelection: true,
-        dataOut: null as { id: number } | null,
-        libraryID: libraryID,
-      };
+      // Get ZoteroPane from the window
+      const ZoteroPane = (mainWindow as unknown as { ZoteroPane?: { getSelectedItems: () => Zotero.Item[] } }).ZoteroPane;
 
-      // Open the item selector dialog
-      (mainWindow as unknown as { openDialog: (url: string, name: string, features: string, io: unknown) => Window }).openDialog(
-        "chrome://zotero/content/selectItemsDialog.xhtml",
-        "",
-        "chrome,dialog=no,modal,centerscreen,resizable=yes",
-        io
-      );
+      if (!ZoteroPane) {
+        sendResponseCallback(500, "application/json", JSON.stringify({
+          success: false,
+          error: "ZoteroPane not available",
+        }));
+        return;
+      }
 
-      // Get the selected item
-      if (io.dataOut && io.dataOut.id) {
-        const item = await (Zotero as unknown as {
-          Items: { getAsync: (id: number) => Promise<Zotero.Item> }
-        }).Items.getAsync(io.dataOut.id);
+      // Get currently selected items
+      const selectedItems = ZoteroPane.getSelectedItems();
 
-        if (item) {
-          // Get citekey from BBT or Extra field
-          let citekey: string | null = null;
+      if (!selectedItems || selectedItems.length === 0) {
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: false,
+          error: "No item selected in Zotero. Please select an item first.",
+        }));
+        return;
+      }
 
-          // Try BBT
-          try {
-            const bbt = (Zotero as Record<string, unknown>).BetterBibTeX as Record<string, unknown> | undefined;
-            if (bbt?.KeyManager) {
-              const km = bbt.KeyManager as { get: (key: string) => { citekey?: string } | null };
-              const result = km.get(item.key);
-              if (result?.citekey) {
-                citekey = result.citekey;
-              }
-            }
-          } catch {
-            // BBT not available
-          }
-
-          // Fall back to Extra field
-          if (!citekey) {
-            try {
-              const extra = item.getField("extra") as string;
-              const match = extra?.match(/Citation Key:\s*(.+)/i);
-              if (match) {
-                citekey = match[1].trim();
-              }
-            } catch {
-              // No citekey in Extra
-            }
-          }
-
-          if (citekey) {
-            sendResponseCallback(200, "application/json", JSON.stringify({
-              success: true,
-              citekey,
-              title: item.getField("title"),
-              itemKey: item.key,
-            }));
-            return;
+      // Use the first selected regular item
+      let item: Zotero.Item | null = null;
+      for (const selected of selectedItems) {
+        if (selected.isRegularItem()) {
+          item = selected;
+          break;
+        }
+        // If it's an attachment, get its parent
+        if (selected.isAttachment()) {
+          const parentID = selected.parentItemID;
+          if (parentID) {
+            item = await (Zotero as unknown as {
+              Items: { getAsync: (id: number) => Promise<Zotero.Item> }
+            }).Items.getAsync(parentID);
+            break;
           }
         }
       }
 
-      sendResponseCallback(200, "application/json", JSON.stringify({
-        success: false,
-        error: "No item selected or item has no citation key",
-      }));
+      if (!item) {
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: false,
+          error: "No regular item selected",
+        }));
+        return;
+      }
+
+      // Get citekey
+      const citekey = await getCitekeyForItem(item);
+
+      if (citekey) {
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: true,
+          citekey,
+          title: item.getField("title"),
+          itemKey: item.key,
+        }));
+      } else {
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: false,
+          error: `Item "${item.getField("title")}" has no citation key. Add one via Better BibTeX or Extra field.`,
+        }));
+      }
     } catch (e) {
       sendResponseCallback(500, "application/json", JSON.stringify({
         success: false,
