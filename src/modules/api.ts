@@ -10,7 +10,7 @@
  * Zotero server limitations. Use POST with JSON body instead.
  */
 
-import { Exporter } from "./exporter";
+import { Exporter, ExportFormat } from "./exporter";
 
 // Type declarations for Zotero's server system
 declare const Zotero: {
@@ -32,8 +32,18 @@ interface ApiResponse {
   citekey?: string;
   title?: string;
   annotationCount?: number;
-  org?: string;
+  format?: string;
+  content?: string;
+  org?: string; // Backwards compatibility
   error?: string;
+  // Batch response fields
+  itemCount?: number;
+  totalAnnotations?: number;
+  items?: Array<{
+    citekey?: string;
+    title: string;
+    annotationCount: number;
+  }>;
 }
 
 /**
@@ -152,7 +162,10 @@ interface ZoteroSearch {
 
 /**
  * HTTP endpoint handler for /export-org/citekey
- * Accepts POST with JSON body: {"key": "<citekey>", "libraryID": <optional>}
+ * Accepts POST with JSON body:
+ *   Single item: {"key": "<citekey>", "libraryID": <optional>, "format": "org"|"md"}
+ *   Batch: {"keys": ["<citekey1>", "<citekey2>"], "libraryID": <optional>, "format": "org"|"md"}
+ * Default format is "md" (markdown).
  */
 function CitekeyEndpoint() {
   // @ts-expect-error - Zotero endpoint pattern
@@ -169,27 +182,101 @@ function CitekeyEndpoint() {
       body?: string,
     ) => void,
   ) {
-    // Parse citekey and optional libraryID from POST body
-    // Note: GET with query params is not supported by Zotero's server
+    // Parse citekey(s), optional libraryID, and format from POST body
     let citekey: string | undefined;
+    let citekeys: string[] | undefined;
     let libraryID: number | undefined;
+    let format: ExportFormat = "md"; // Default to markdown
 
     if (data && typeof data === "object") {
       const dataObj = data as Record<string, unknown>;
       if (typeof dataObj.key === "string") {
         citekey = dataObj.key;
       }
+      if (Array.isArray(dataObj.keys)) {
+        citekeys = dataObj.keys.filter((k): k is string => typeof k === "string");
+      }
       if (typeof dataObj.libraryID === "number") {
         libraryID = dataObj.libraryID;
       }
+      if (dataObj.format === "org" || dataObj.format === "md") {
+        format = dataObj.format;
+      }
     }
 
-    ztoolkit.log("API request, citekey:", citekey, "libraryID:", libraryID);
+    // Handle batch request (array of keys)
+    if (citekeys && citekeys.length > 0) {
+      ztoolkit.log("API batch request, citekeys:", citekeys.length, "libraryID:", libraryID, "format:", format);
+
+      try {
+        const items: Zotero.Item[] = [];
+        const resolvedCitekeys: string[] = [];
+        const notFoundKeys: string[] = [];
+
+        // Resolve each citekey to an item
+        for (const key of citekeys) {
+          const item = await findItemByCitekey(key, libraryID);
+          if (item) {
+            items.push(item);
+            resolvedCitekeys.push(key);
+          } else {
+            notFoundKeys.push(key);
+          }
+        }
+
+        if (items.length === 0) {
+          const response: ApiResponse = {
+            success: false,
+            error: `No items found for citekeys: ${citekeys.join(", ")}`,
+          };
+          sendResponseCallback(404, "application/json", JSON.stringify(response));
+          return;
+        }
+
+        // Generate batch content
+        const result = await Exporter.generateBatchContent(items, format, resolvedCitekeys);
+
+        if (!result) {
+          const response: ApiResponse = {
+            success: false,
+            error: "No annotations found for any of the specified items",
+          };
+          sendResponseCallback(404, "application/json", JSON.stringify(response));
+          return;
+        }
+
+        const response: ApiResponse = {
+          success: true,
+          itemCount: result.itemCount,
+          totalAnnotations: result.totalAnnotations,
+          format,
+          content: result.content,
+          items: result.items,
+          // Backwards compatibility
+          ...(format === "org" ? { org: result.content } : {}),
+          // Include warning if some keys weren't found
+          ...(notFoundKeys.length > 0 ? { error: `Items not found: ${notFoundKeys.join(", ")}` } : {}),
+        };
+
+        sendResponseCallback(200, "application/json", JSON.stringify(response));
+        return;
+      } catch (e) {
+        const response: ApiResponse = {
+          success: false,
+          error: `Error processing batch request: ${e instanceof Error ? e.message : String(e)}`,
+        };
+        sendResponseCallback(500, "application/json", JSON.stringify(response));
+        return;
+      }
+    }
+
+    // Handle single item request (original behavior)
+    ztoolkit.log("API request, citekey:", citekey, "libraryID:", libraryID, "format:", format);
 
     if (!citekey) {
       const response: ApiResponse = {
         success: false,
-        error: "Missing 'key' parameter. Use POST with JSON body: {\"key\": \"<citekey>\"}",
+        error: "Missing 'key' or 'keys' parameter. Use POST with JSON body: {\"key\": \"<citekey>\"} or {\"keys\": [\"key1\", \"key2\"]}",
       };
       sendResponseCallback(400, "application/json", JSON.stringify(response));
       return;
@@ -208,8 +295,8 @@ function CitekeyEndpoint() {
         return;
       }
 
-      // Generate org content
-      const result = await Exporter.generateOrgContent(item);
+      // Generate content in requested format
+      const result = await Exporter.generateContent(item, format);
 
       if (!result) {
         const response: ApiResponse = {
@@ -233,7 +320,10 @@ function CitekeyEndpoint() {
         citekey,
         title,
         annotationCount: result.annotationCount,
-        org: result.content,
+        format,
+        content: result.content,
+        // Backwards compatibility: also include 'org' field when format is org
+        ...(format === "org" ? { org: result.content } : {}),
       };
 
       sendResponseCallback(200, "application/json", JSON.stringify(response));
@@ -300,63 +390,8 @@ function LibrariesEndpoint() {
 }
 
 /**
- * Get citekey for a Zotero item using BBT or Extra field
- */
-async function getCitekeyForItem(item: Zotero.Item): Promise<string | null> {
-  // Try BBT KeyManager
-  try {
-    const bbt = (Zotero as Record<string, unknown>).BetterBibTeX as Record<string, unknown> | undefined;
-    if (bbt?.KeyManager) {
-      const km = bbt.KeyManager as { get: (key: string) => { citekey?: string } | null };
-      const result = km.get(item.key);
-      if (result?.citekey) {
-        return result.citekey;
-      }
-    }
-  } catch {
-    // BBT not available
-  }
-
-  // Try BBT JSON-RPC for this specific item
-  try {
-    const port = (Zotero as unknown as { Prefs: { get: (key: string) => number } }).Prefs.get("httpServer.port") || 23119;
-    const response = await fetch(`http://localhost:${port}/better-bibtex/json-rpc`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        method: "item.citationkey",
-        params: [item.id],
-        id: 1,
-      }),
-    });
-    if (response.ok) {
-      const data = await response.json() as { result?: string };
-      if (data.result) {
-        return data.result;
-      }
-    }
-  } catch {
-    // BBT JSON-RPC failed
-  }
-
-  // Fall back to Extra field
-  try {
-    const extra = item.getField("extra") as string;
-    const match = extra?.match(/Citation Key:\s*(.+)/i);
-    if (match) {
-      return match[1].trim();
-    }
-  } catch {
-    // No citekey in Extra
-  }
-
-  return null;
-}
-
-/**
  * HTTP endpoint handler for /export-org/picker
- * Returns citekey of currently selected item in Zotero, or opens quick search
+ * Returns citekey of currently selected item in Zotero using BBT API
  */
 function PickerEndpoint() {
   // @ts-expect-error - Zotero endpoint pattern
@@ -374,34 +409,44 @@ function PickerEndpoint() {
     ) => void,
   ) {
     try {
-      // Get the main window and ZoteroPane
-      const mainWindow = Zotero.getMainWindow();
-      if (!mainWindow) {
-        sendResponseCallback(500, "application/json", JSON.stringify({
-          success: false,
-          error: "Zotero main window not available",
-        }));
-        return;
-      }
-
       // Focus Zotero window
-      mainWindow.focus();
+      const mainWindow = Zotero.getMainWindow() as Window | null;
+      if (mainWindow) {
+        mainWindow.focus();
+      }
 
-      // Get ZoteroPane from the window
-      const ZoteroPane = (mainWindow as unknown as { ZoteroPane?: { getSelectedItems: () => Zotero.Item[] } }).ZoteroPane;
+      // Use BBT's item.citationkey("selected") to get citekey of selected items
+      const port = (Zotero as unknown as { Prefs: { get: (key: string) => number } }).Prefs.get("httpServer.port") || 23119;
+      const response = await fetch(`http://localhost:${port}/better-bibtex/json-rpc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "item.citationkey",
+          params: ["selected"],
+          id: 1,
+        }),
+      });
 
-      if (!ZoteroPane) {
+      if (!response.ok) {
         sendResponseCallback(500, "application/json", JSON.stringify({
           success: false,
-          error: "ZoteroPane not available",
+          error: "Failed to query Better BibTeX",
         }));
         return;
       }
 
-      // Get currently selected items
-      const selectedItems = ZoteroPane.getSelectedItems();
+      const data = await response.json() as { result?: Record<string, string | null>; error?: { message: string } };
 
-      if (!selectedItems || selectedItems.length === 0) {
+      if (data.error) {
+        sendResponseCallback(500, "application/json", JSON.stringify({
+          success: false,
+          error: `BBT error: ${data.error.message}`,
+        }));
+        return;
+      }
+
+      if (!data.result || Object.keys(data.result).length === 0) {
         sendResponseCallback(200, "application/json", JSON.stringify({
           success: false,
           error: "No item selected in Zotero. Please select an item first.",
@@ -409,53 +454,242 @@ function PickerEndpoint() {
         return;
       }
 
-      // Use the first selected regular item
-      let item: Zotero.Item | null = null;
-      for (const selected of selectedItems) {
-        if (selected.isRegularItem()) {
-          item = selected;
-          break;
-        }
-        // If it's an attachment, get its parent
-        if (selected.isAttachment()) {
-          const parentID = selected.parentItemID;
-          if (parentID) {
-            item = await (Zotero as unknown as {
-              Items: { getAsync: (id: number) => Promise<Zotero.Item> }
-            }).Items.getAsync(parentID);
-            break;
-          }
-        }
-      }
+      // Get the first citekey from the result
+      const entries = Object.entries(data.result);
+      const [itemKey, citekey] = entries[0];
 
-      if (!item) {
+      if (!citekey) {
         sendResponseCallback(200, "application/json", JSON.stringify({
           success: false,
-          error: "No regular item selected",
+          error: "Selected item has no citation key. Ensure Better BibTeX is configured.",
         }));
         return;
       }
 
-      // Get citekey
-      const citekey = await getCitekeyForItem(item);
-
-      if (citekey) {
-        sendResponseCallback(200, "application/json", JSON.stringify({
-          success: true,
-          citekey,
-          title: item.getField("title"),
-          itemKey: item.key,
-        }));
-      } else {
-        sendResponseCallback(200, "application/json", JSON.stringify({
-          success: false,
-          error: `Item "${item.getField("title")}" has no citation key. Add one via Better BibTeX or Extra field.`,
-        }));
-      }
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: true,
+        citekey,
+        itemKey,
+      }));
     } catch (e) {
       sendResponseCallback(500, "application/json", JSON.stringify({
         success: false,
         error: `Error in picker: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
+/**
+ * HTTP endpoint handler for /export-org/collections
+ * Lists all collections in a Zotero library.
+ * Accepts POST with JSON body: {"libraryID": <optional>, "recursive": <optional bool>}
+ */
+function CollectionsListEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["GET", "POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    let libraryID: number | undefined;
+
+    if (data && typeof data === "object") {
+      const dataObj = data as Record<string, unknown>;
+      if (typeof dataObj.libraryID === "number") {
+        libraryID = dataObj.libraryID;
+      }
+    }
+
+    const targetLibraryID = libraryID ?? Zotero.Libraries.userLibraryID;
+
+    try {
+      const ZoteroCollections = (Zotero as unknown as {
+        Collections: {
+          getByLibrary: (libraryID: number) => Array<{
+            key: string;
+            name: string;
+            parentKey: string | null;
+          }>;
+        };
+      }).Collections;
+
+      const collections = ZoteroCollections.getByLibrary(targetLibraryID);
+
+      const result = collections.map((col) => ({
+        key: col.key,
+        name: col.name,
+        parentKey: col.parentKey,
+      }));
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: true,
+        libraryID: targetLibraryID,
+        collections: result,
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error listing collections: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
+/**
+ * HTTP endpoint handler for /export-org/collection
+ * Exports all annotations from items in a Zotero collection.
+ * Accepts POST with JSON body: {"collectionID": <number>, "recursive": <bool>, "format": "org"|"md", "libraryID": <optional>}
+ */
+function CollectionEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    let collectionKey: string | undefined;
+    let recursive = false;
+    let libraryID: number | undefined;
+    let format: ExportFormat = "md";
+
+    if (data && typeof data === "object") {
+      const dataObj = data as Record<string, unknown>;
+      // Accept collectionKey (string) or collectionID (string or number for backwards compat)
+      if (typeof dataObj.collectionKey === "string") {
+        collectionKey = dataObj.collectionKey;
+      } else if (typeof dataObj.collectionID === "string") {
+        collectionKey = dataObj.collectionID;
+      } else if (typeof dataObj.collectionID === "number") {
+        collectionKey = String(dataObj.collectionID);
+      }
+      if (typeof dataObj.recursive === "boolean") {
+        recursive = dataObj.recursive;
+      }
+      if (typeof dataObj.libraryID === "number") {
+        libraryID = dataObj.libraryID;
+      }
+      if (dataObj.format === "org" || dataObj.format === "md") {
+        format = dataObj.format;
+      }
+    }
+
+    ztoolkit.log("Collection API request, collectionKey:", collectionKey, "recursive:", recursive, "format:", format);
+
+    if (!collectionKey) {
+      sendResponseCallback(400, "application/json", JSON.stringify({
+        success: false,
+        error: "Missing 'collectionKey' or 'collectionID' parameter. Use POST with JSON body: {\"collectionKey\": \"<key>\"}",
+      }));
+      return;
+    }
+
+    try {
+      // Get collection by key
+      const ZoteroCollections = (Zotero as unknown as {
+        Collections: {
+          getByLibraryAndKeyAsync: (libraryID: number, key: string) => Promise<{
+            name: string;
+            libraryID: number;
+            getChildItems: () => Zotero.Item[];
+            getDescendents: (recursive: boolean, type: string) => Array<{ type: string; id: number }>;
+          } | null>;
+        };
+      }).Collections;
+
+      // Use provided libraryID or default to user library
+      const targetLibraryID = libraryID ?? Zotero.Libraries.userLibraryID;
+      const collection = await ZoteroCollections.getByLibraryAndKeyAsync(targetLibraryID, collectionKey);
+
+      if (!collection) {
+        sendResponseCallback(404, "application/json", JSON.stringify({
+          success: false,
+          error: `Collection not found: ${collectionKey}`,
+        }));
+        return;
+      }
+
+      const collectionName = collection.name;
+
+      // Get items from collection
+      let items: Zotero.Item[] = [];
+
+      if (recursive) {
+        // Get all descendant items (recursive)
+        const descendants = collection.getDescendents(true, "item");
+        const itemIDs = descendants
+          .filter((d: { type: string }) => d.type === "item")
+          .map((d: { id: number }) => d.id);
+
+        if (itemIDs.length > 0) {
+          items = await (Zotero as unknown as {
+            Items: { getAsync: (ids: number[]) => Promise<Zotero.Item[]> };
+          }).Items.getAsync(itemIDs);
+        }
+      } else {
+        // Get direct children only
+        items = collection.getChildItems();
+      }
+
+      // Filter to regular items only (skip attachments, notes)
+      items = items.filter((item) => item.isRegularItem());
+
+      if (items.length === 0) {
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: false,
+          collectionName,
+          error: "No regular items found in collection",
+        }));
+        return;
+      }
+
+      ztoolkit.log("Found", items.length, "items in collection", collectionName);
+
+      // Generate batch content
+      const result = await Exporter.generateBatchContent(items, format);
+
+      if (!result) {
+        sendResponseCallback(200, "application/json", JSON.stringify({
+          success: false,
+          collectionName,
+          itemCount: items.length,
+          error: "No annotations found in any items",
+        }));
+        return;
+      }
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: true,
+        collectionName,
+        collectionKey,
+        recursive,
+        itemCount: result.itemCount,
+        totalAnnotations: result.totalAnnotations,
+        format,
+        content: result.content,
+        items: result.items,
+        ...(format === "org" ? { org: result.content } : {}),
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error processing collection: ${e instanceof Error ? e.message : String(e)}`,
       }));
     }
   };
@@ -469,6 +703,8 @@ export class ApiEndpoints {
     Zotero.Server.Endpoints["/export-org/citekey"] = CitekeyEndpoint;
     Zotero.Server.Endpoints["/export-org/libraries"] = LibrariesEndpoint;
     Zotero.Server.Endpoints["/export-org/picker"] = PickerEndpoint;
-    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker");
+    Zotero.Server.Endpoints["/export-org/collections"] = CollectionsListEndpoint;
+    Zotero.Server.Endpoints["/export-org/collection"] = CollectionEndpoint;
+    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker, /export-org/collections, /export-org/collection");
   }
 }

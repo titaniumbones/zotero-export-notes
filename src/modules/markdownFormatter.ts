@@ -1,33 +1,23 @@
 /**
- * Formats Zotero annotations as org-mode blocks.
+ * Formats Zotero annotations as markdown blocks.
  *
  * Annotation type mapping:
- * - highlight, underline → #+begin_quote / #+end_quote
- * - note → #+begin_comment / #+end_comment
- * - image, ink → #+begin_example with placeholder
+ * - highlight, underline -> blockquote (> text)
+ * - note -> paragraph
+ * - image, ink -> placeholder text
  *
  * Links use Zotero protocols:
- * - PDF: [[zotero://open-pdf/library/items/KEY?page=N&annotation=ANNOT_KEY][Page N]]:
- * - EPUB: [[zotero://open-epub/library/items/KEY?annotation=ANNOT_KEY][Location]]:
+ * - PDF: zotero://open-pdf/library/items/KEY?page=N&annotation=ANNOT_KEY
+ * - EPUB: zotero://open-epub/library/items/KEY?annotation=ANNOT_KEY
  */
 
-export interface ZoteroAnnotation {
-  annotationType: "highlight" | "underline" | "note" | "image" | "ink";
-  annotationText?: string;
-  annotationComment?: string;
-  annotationPageLabel: string;
-  annotationPosition: string;
-  annotationColor?: string;
-  annotationSortIndex?: string;
-  key: string;
-  getTags(): Array<{ tag: string }>;
-}
+import { ZoteroAnnotation } from "./annotationFormatter";
 
 /**
- * Generate Zotero link for an annotation in org-mode format.
+ * Generate Zotero link for an annotation in markdown format.
  * Supports both PDF and EPUB attachments.
  */
-function generateZoteroOrgLink(
+function generateZoteroLink(
   attachmentKey: string,
   libraryID: number,
   annotation: ZoteroAnnotation,
@@ -37,22 +27,21 @@ function generateZoteroOrgLink(
   const libraryPath = libraryID === 1 ? "library" : `groups/${libraryID}`;
 
   if (contentType === "application/epub+zip") {
-    // EPUB: Use location label as-is (may be chapter or EPUBCFI)
+    // EPUB: Use location label as-is
     const location = annotation.annotationPageLabel || "Location";
     const url = `zotero://open-epub/${libraryPath}/items/${attachmentKey}?annotation=${annotKey}`;
-    return `[[${url}][${location}]]:`;
+    return `[${location}](${url})`;
   } else {
     // PDF: Use numeric page
     const page = parseInt(annotation.annotationPageLabel) || 1;
     const url = `zotero://open-pdf/${libraryPath}/items/${attachmentKey}?page=${page}&annotation=${annotKey}`;
-    return `[[${url}][Page ${page}]]:`;
+    return `[Page ${page}](${url})`;
   }
 }
 
-export class AnnotationFormatter {
+export class MarkdownFormatter {
   /**
-   * Format a single annotation as org-mode text.
-   * Output order: link (with colon), block, optional comment, optional tags.
+   * Format a single annotation as markdown text.
    */
   static format(
     annotation: ZoteroAnnotation,
@@ -83,29 +72,32 @@ export class AnnotationFormatter {
     libraryID: number,
     contentType: string,
   ): string {
-    const link = generateZoteroOrgLink(attachmentKey, libraryID, annot, contentType);
+    const link = generateZoteroLink(attachmentKey, libraryID, annot, contentType);
     const text = annot.annotationText || "";
     const comment = annot.annotationComment;
     const tags = this.formatTags(annot);
 
     let output = "";
 
-    // Link first (above the block)
-    output += link + "\n";
+    // Link first
+    output += link + "\n\n";
 
-    // Quote block for highlighted/underlined text
-    output += "#+begin_quote\n";
-    output += text.trim() + "\n";
-    output += "#+end_quote\n";
+    // Blockquote for highlighted/underlined text
+    const quotedLines = text
+      .trim()
+      .split("\n")
+      .map((line) => "> " + line)
+      .join("\n");
+    output += quotedLines + "\n";
 
-    // Comment as separate paragraph (below block)
+    // Comment as separate paragraph
     if (comment && comment.trim()) {
       output += "\n" + comment.trim() + "\n";
     }
 
-    // Tags on their own line
+    // Tags as hashtags
     if (tags) {
-      output += tags + "\n";
+      output += "\n" + tags + "\n";
     }
 
     return output;
@@ -117,22 +109,20 @@ export class AnnotationFormatter {
     libraryID: number,
     contentType: string,
   ): string {
-    const link = generateZoteroOrgLink(attachmentKey, libraryID, annot, contentType);
+    const link = generateZoteroLink(attachmentKey, libraryID, annot, contentType);
     const comment = annot.annotationComment || "";
     const tags = this.formatTags(annot);
 
     let output = "";
 
     // Link first
-    output += link + "\n";
+    output += link + "\n\n";
 
-    // Comment block for standalone notes
-    output += "#+begin_comment\n";
+    // Note content as paragraph
     output += comment.trim() + "\n";
-    output += "#+end_comment\n";
 
     if (tags) {
-      output += tags + "\n";
+      output += "\n" + tags + "\n";
     }
 
     return output;
@@ -144,24 +134,22 @@ export class AnnotationFormatter {
     libraryID: number,
     contentType: string,
   ): string {
-    const link = generateZoteroOrgLink(attachmentKey, libraryID, annot, contentType);
+    const link = generateZoteroLink(attachmentKey, libraryID, annot, contentType);
     const comment = annot.annotationComment;
     const location = annot.annotationPageLabel;
     const tags = this.formatTags(annot);
 
     let output = "";
 
-    output += link + "\n";
-    output += "#+begin_example\n";
-    output += `[Image annotation at ${location}]\n`;
-    output += "#+end_example\n";
+    output += link + "\n\n";
+    output += `*[Image annotation at ${location}]*\n`;
 
     if (comment && comment.trim()) {
       output += "\n" + comment.trim() + "\n";
     }
 
     if (tags) {
-      output += tags + "\n";
+      output += "\n" + tags + "\n";
     }
 
     return output;
@@ -173,24 +161,22 @@ export class AnnotationFormatter {
     libraryID: number,
     contentType: string,
   ): string {
-    const link = generateZoteroOrgLink(attachmentKey, libraryID, annot, contentType);
+    const link = generateZoteroLink(attachmentKey, libraryID, annot, contentType);
     const comment = annot.annotationComment;
     const location = annot.annotationPageLabel;
     const tags = this.formatTags(annot);
 
     let output = "";
 
-    output += link + "\n";
-    output += "#+begin_example\n";
-    output += `[Ink/drawing annotation at ${location}]\n`;
-    output += "#+end_example\n";
+    output += link + "\n\n";
+    output += `*[Ink/drawing annotation at ${location}]*\n`;
 
     if (comment && comment.trim()) {
       output += "\n" + comment.trim() + "\n";
     }
 
     if (tags) {
-      output += tags + "\n";
+      output += "\n" + tags + "\n";
     }
 
     return output;
@@ -202,20 +188,19 @@ export class AnnotationFormatter {
     libraryID: number,
     contentType: string,
   ): string {
-    const link = generateZoteroOrgLink(attachmentKey, libraryID, annot, contentType);
+    const link = generateZoteroLink(attachmentKey, libraryID, annot, contentType);
     const text = annot.annotationText || annot.annotationComment || "";
 
-    return `${link}\n${text.trim()}\n`;
+    return `${link}\n\n${text.trim()}\n`;
   }
 
   private static formatTags(annot: ZoteroAnnotation): string {
     const tags = annot.getTags();
     if (!tags || tags.length === 0) return "";
 
-    // Org-mode tag format: :tag1:tag2:tag3:
-    const tagStr = tags
-      .map((t) => t.tag.replace(/\s+/g, "_").replace(/:/g, "-"))
-      .join(":");
-    return `:${tagStr}:`;
+    // Markdown tag format: #tag1 #tag2 #tag3
+    return tags
+      .map((t) => "#" + t.tag.replace(/\s+/g, "_").replace(/#/g, ""))
+      .join(" ");
   }
 }

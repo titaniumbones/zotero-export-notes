@@ -1,37 +1,65 @@
 /**
- * Main export orchestration for PDF annotations to org-mode.
+ * Main export orchestration for PDF and EPUB annotations.
+ * Supports multiple output formats: org-mode and markdown.
  */
+
+// Supported attachment content types
+const SUPPORTED_CONTENT_TYPES = [
+  "application/pdf",
+  "application/epub+zip",
+];
 
 import {
   AnnotationFormatter,
   ZoteroAnnotation,
 } from "./annotationFormatter";
 import { MetadataFormatter } from "./metadataFormatter";
+import { MarkdownFormatter } from "./markdownFormatter";
+import { MarkdownMetadataFormatter } from "./markdownMetadataFormatter";
+
+export type ExportFormat = "org" | "md";
 
 interface GenerateResult {
   content: string;
   annotationCount: number;
 }
 
+interface BatchGenerateResult {
+  content: string;
+  totalAnnotations: number;
+  itemCount: number;
+  items: Array<{
+    title: string;
+    citekey?: string;
+    annotationCount: number;
+  }>;
+}
+
 export class Exporter {
   /**
    * Export annotations from multiple items to files.
    */
-  static async exportItems(items: Zotero.Item[]): Promise<void> {
+  static async exportItems(
+    items: Zotero.Item[],
+    format: ExportFormat = "md",
+  ): Promise<void> {
     for (const item of items) {
-      await this.exportItem(item);
+      await this.exportItem(item, format);
     }
   }
 
   /**
    * Copy annotations from multiple items to clipboard.
    */
-  static async copyItems(items: Zotero.Item[]): Promise<void> {
+  static async copyItems(
+    items: Zotero.Item[],
+    format: ExportFormat = "md",
+  ): Promise<void> {
     let allContent = "";
     let totalAnnotations = 0;
 
     for (const item of items) {
-      const result = await this.generateOrgContent(item);
+      const result = await this.generateContent(item, format);
       if (result) {
         allContent += result.content;
         totalAnnotations += result.annotationCount;
@@ -57,22 +85,26 @@ export class Exporter {
       .addText(allContent, "text/plain")
       .copy();
 
+    const formatLabel = format === "org" ? "org-mode" : "Markdown";
     new ztoolkit.ProgressWindow(addon.data.config.addonName)
       .createLine({
-        text: `Copied ${totalAnnotations} annotations to clipboard`,
+        text: `Copied ${totalAnnotations} annotations as ${formatLabel}`,
         type: "success",
       })
       .show();
   }
 
   /**
-   * Export annotations from a single item to an org file.
+   * Export annotations from a single item to a file.
    */
-  static async exportItem(item: Zotero.Item): Promise<void> {
-    const result = await this.generateOrgContent(item);
+  static async exportItem(
+    item: Zotero.Item,
+    format: ExportFormat = "md",
+  ): Promise<void> {
+    const result = await this.generateContent(item, format);
 
     if (!result || result.annotationCount === 0) {
-      return; // Error already shown by generateOrgContent
+      return; // Error already shown by generateContent
     }
 
     // Get parent item for filename
@@ -83,8 +115,8 @@ export class Exporter {
         : null;
 
     // Prompt for save location
-    const defaultFilename = this.generateFilename(parentItem || item);
-    const savePath = await this.promptSaveLocation(defaultFilename);
+    const defaultFilename = this.generateFilename(parentItem || item, format);
+    const savePath = await this.promptSaveLocation(defaultFilename, format);
 
     if (savePath) {
       await Zotero.File.putContentsAsync(savePath, result.content);
@@ -98,22 +130,23 @@ export class Exporter {
   }
 
   /**
-   * Generate org-mode content for an item's annotations.
-   * Returns null if no PDF attachments found.
+   * Generate content for an item's annotations.
+   * Returns null if no supported attachments (PDF/EPUB) found.
    */
-  static async generateOrgContent(
+  static async generateContent(
     item: Zotero.Item,
+    format: ExportFormat = "md",
   ): Promise<GenerateResult | null> {
-    // Get PDF attachment(s)
+    // Get PDF and EPUB attachment(s)
     const attachments: Zotero.Item[] = [];
 
-    if (item.isPDFAttachment?.()) {
+    if (item.isPDFAttachment?.() || item.isEPUBAttachment?.()) {
       attachments.push(item);
     } else if (item.isRegularItem()) {
       const attachmentIDs = item.getAttachments();
       for (const id of attachmentIDs) {
         const att = await Zotero.Items.getAsync(id);
-        if (att && att.attachmentContentType === "application/pdf") {
+        if (att && SUPPORTED_CONTENT_TYPES.includes(att.attachmentContentType)) {
           attachments.push(att);
         }
       }
@@ -122,15 +155,15 @@ export class Exporter {
     if (attachments.length === 0) {
       new ztoolkit.ProgressWindow(addon.data.config.addonName)
         .createLine({
-          text: "No PDF attachments found",
+          text: "No PDF or EPUB attachments found",
           type: "fail",
         })
         .show();
       return null;
     }
 
-    // Generate org content
-    let orgContent = "";
+    // Generate content
+    let content = "";
 
     // Get parent item for metadata
     const parentItem = item.isRegularItem()
@@ -140,7 +173,10 @@ export class Exporter {
         : null;
 
     if (parentItem) {
-      orgContent += MetadataFormatter.format(parentItem);
+      content +=
+        format === "org"
+          ? MetadataFormatter.format(parentItem)
+          : MarkdownMetadataFormatter.format(parentItem);
     }
 
     let totalAnnotations = 0;
@@ -163,22 +199,25 @@ export class Exporter {
         );
       });
 
-      const filePath = await attachment.getFilePath();
-      if (!filePath) {
-        ztoolkit.log("Could not get file path for attachment:", attachment.key);
-        continue;
-      }
+      // Get data needed for formatting
+      const attachmentKey = attachment.key;
+      const libraryID = attachment.libraryID;
+      const contentType = attachment.attachmentContentType;
 
       for (const annot of annotations) {
-        orgContent += AnnotationFormatter.format(annot, filePath);
-        orgContent += "\n";
+        if (format === "org") {
+          content += AnnotationFormatter.format(annot, attachmentKey, libraryID, contentType);
+        } else {
+          content += MarkdownFormatter.format(annot, attachmentKey, libraryID, contentType);
+        }
+        content += "\n";
       }
     }
 
     if (totalAnnotations === 0) {
       new ztoolkit.ProgressWindow(addon.data.config.addonName)
         .createLine({
-          text: "No annotations found in PDF(s)",
+          text: "No annotations found",
           type: "fail",
         })
         .show();
@@ -186,12 +225,83 @@ export class Exporter {
     }
 
     return {
-      content: orgContent,
+      content,
       annotationCount: totalAnnotations,
     };
   }
 
-  private static generateFilename(item: Zotero.Item): string {
+  /**
+   * Generate org-mode content (backwards compatibility wrapper).
+   */
+  static async generateOrgContent(
+    item: Zotero.Item,
+  ): Promise<GenerateResult | null> {
+    return this.generateContent(item, "org");
+  }
+
+  /**
+   * Generate content for multiple items (batch export).
+   * Returns combined content with stats for each item.
+   */
+  static async generateBatchContent(
+    items: Zotero.Item[],
+    format: ExportFormat = "md",
+    citekeys?: string[],
+  ): Promise<BatchGenerateResult | null> {
+    const itemResults: BatchGenerateResult["items"] = [];
+    let allContent = "";
+    let totalAnnotations = 0;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const result = await this.generateContent(item, format);
+
+      if (result && result.annotationCount > 0) {
+        // Get title
+        let title = "";
+        try {
+          const parentItem = item.isRegularItem()
+            ? item
+            : item.parentItemID
+              ? await Zotero.Items.getAsync(item.parentItemID)
+              : null;
+          title = parentItem ? (parentItem.getField("title") as string) : "";
+        } catch {
+          // Title not available
+        }
+
+        itemResults.push({
+          title,
+          citekey: citekeys?.[i],
+          annotationCount: result.annotationCount,
+        });
+
+        allContent += result.content;
+        totalAnnotations += result.annotationCount;
+
+        // Add separator between items
+        if (i < items.length - 1) {
+          allContent += "\n";
+        }
+      }
+    }
+
+    if (itemResults.length === 0) {
+      return null;
+    }
+
+    return {
+      content: allContent,
+      totalAnnotations,
+      itemCount: itemResults.length,
+      items: itemResults,
+    };
+  }
+
+  private static generateFilename(
+    item: Zotero.Item,
+    format: ExportFormat = "md",
+  ): string {
     let title = "annotations";
     try {
       title = (item.getField("title") as string) || "annotations";
@@ -203,22 +313,30 @@ export class Exporter {
       .replace(/[^a-zA-Z0-9\-_\s]/g, "")
       .replace(/\s+/g, "_")
       .substring(0, 50);
-    return `${safeTitle}.org`;
+    const extension = format === "org" ? ".org" : ".md";
+    return `${safeTitle}${extension}`;
   }
 
   private static async promptSaveLocation(
     defaultFilename: string,
+    format: ExportFormat = "md",
   ): Promise<string | null> {
+    const extension = format === "org" ? ".org" : ".md";
+    const filterLabel =
+      format === "org" ? "Org Files (*.org)" : "Markdown Files (*.md)";
+    const filterPattern = format === "org" ? "*.org" : "*.md";
+    const dialogTitle = format === "org" ? "Save Org File" : "Save Markdown File";
+
     const path = await new ztoolkit.FilePicker(
-      "Save Org File",
+      dialogTitle,
       "save",
-      [["Org Files (*.org)", "*.org"]],
+      [[filterLabel, filterPattern]],
       defaultFilename,
     ).open();
 
     if (path) {
-      // Ensure .org extension
-      return path.endsWith(".org") ? path : path + ".org";
+      // Ensure correct extension
+      return path.endsWith(extension) ? path : path + extension;
     }
     return null;
   }

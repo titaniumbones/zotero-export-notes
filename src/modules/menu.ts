@@ -1,5 +1,6 @@
 /**
- * Context menu registration for "Export Annotations to Org".
+ * Context menu registration for "Export Annotations".
+ * Supports multiple export formats: Markdown and Org-mode.
  */
 
 import { config } from "../../package.json";
@@ -19,36 +20,76 @@ export class MenuFactory {
   static registerItemContextMenu(): void {
     const menuIcon = `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`;
 
-    // Submenu with both options
+    // Main menu with format submenus
     ztoolkit.Menu.register("item", {
       tag: "menu",
-      id: "zotero-export-org-notes-menu",
-      label: "Export Annotations to Org",
+      id: "zotero-export-notes-menu",
+      label: "Export Annotations",
       icon: menuIcon,
       children: [
+        // Markdown submenu
         {
-          tag: "menuitem",
-          id: "zotero-export-org-notes-file",
-          label: "Save to File...",
-          commandListener: async () => {
-            const zp = getZoteroPane();
-            const items = zp?.getSelectedItems();
-            if (items && items.length > 0) {
-              await Exporter.exportItems(items);
-            }
-          },
+          tag: "menu",
+          id: "zotero-export-notes-markdown-menu",
+          label: "Markdown",
+          children: [
+            {
+              tag: "menuitem",
+              id: "zotero-export-notes-md-file",
+              label: "Save to File...",
+              commandListener: async () => {
+                const zp = getZoteroPane();
+                const items = zp?.getSelectedItems();
+                if (items && items.length > 0) {
+                  await Exporter.exportItems(items, "md");
+                }
+              },
+            },
+            {
+              tag: "menuitem",
+              id: "zotero-export-notes-md-clipboard",
+              label: "Copy to Clipboard",
+              commandListener: async () => {
+                const zp = getZoteroPane();
+                const items = zp?.getSelectedItems();
+                if (items && items.length > 0) {
+                  await Exporter.copyItems(items, "md");
+                }
+              },
+            },
+          ],
         },
+        // Org-mode submenu
         {
-          tag: "menuitem",
-          id: "zotero-export-org-notes-clipboard",
-          label: "Copy to Clipboard",
-          commandListener: async () => {
-            const zp = getZoteroPane();
-            const items = zp?.getSelectedItems();
-            if (items && items.length > 0) {
-              await Exporter.copyItems(items);
-            }
-          },
+          tag: "menu",
+          id: "zotero-export-notes-org-menu",
+          label: "Org-mode",
+          children: [
+            {
+              tag: "menuitem",
+              id: "zotero-export-notes-org-file",
+              label: "Save to File...",
+              commandListener: async () => {
+                const zp = getZoteroPane();
+                const items = zp?.getSelectedItems();
+                if (items && items.length > 0) {
+                  await Exporter.exportItems(items, "org");
+                }
+              },
+            },
+            {
+              tag: "menuitem",
+              id: "zotero-export-notes-org-clipboard",
+              label: "Copy to Clipboard",
+              commandListener: async () => {
+                const zp = getZoteroPane();
+                const items = zp?.getSelectedItems();
+                if (items && items.length > 0) {
+                  await Exporter.copyItems(items, "org");
+                }
+              },
+            },
+          ],
         },
       ],
       getVisibility: () => {

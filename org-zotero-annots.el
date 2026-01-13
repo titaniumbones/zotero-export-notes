@@ -19,8 +19,12 @@
 ;; - citar package for citation key completion from BibTeX library
 ;;
 ;; Usage:
-;;   M-x org-zotero-annots-insert
-;;   M-x org-zotero-annots-insert-at-point
+;;   M-x org-zotero-annots-insert              ; Insert single item by citekey
+;;   M-x org-zotero-annots-insert-at-point     ; Insert at point
+;;   M-x org-zotero-annots-insert-collection   ; Insert all items in a collection
+;;   M-x org-zotero-annots-insert-collection-at-point
+;;
+;; For collection commands, use C-u prefix to include subcollections recursively.
 ;;
 ;; Configuration:
 ;;   (setq org-zotero-annots-port 23119)  ; Zotero HTTP server port
@@ -191,17 +195,20 @@ Focuses Zotero window and prompts user to select an item if needed."
 
 (defun org-zotero-annots--fetch (citekey)
   "Fetch annotations for CITEKEY from Zotero API.
-Returns a plist with :success, :org, :title, :count, and :error keys."
+Returns a plist with :success, :org, :title, :count, and :error keys.
+Explicitly requests org-mode format since the API now defaults to markdown."
   (let* ((library-id (org-zotero-annots--get-library-id))
-         (request-data (if library-id
-                           `((key . ,citekey) (libraryID . ,library-id))
-                         `((key . ,citekey))))
+         (request-data `((key . ,citekey)
+                         (format . "org")  ; Explicitly request org format
+                         ,@(when library-id
+                             `((libraryID . ,library-id)))))
          (url (format "http://localhost:%d/export-org/citekey" org-zotero-annots-port))
          (response (org-zotero-annots--http-post url request-data)))
     (if response
         (if (eq (plist-get response :success) t)
             (list :success t
-                  :org (plist-get response :org)
+                  :org (or (plist-get response :org)
+                           (plist-get response :content))
                   :title (plist-get response :title)
                   :count (plist-get response :annotationCount))
           (list :success nil
@@ -261,6 +268,110 @@ Otherwise, insert at end of current subtree."
                    (plist-get result :title)))
       ;; Report error
       (user-error "Failed to fetch annotations: %s" (plist-get result :error)))))
+
+;;; Internal Functions - Collection Support
+
+(defun org-zotero-annots--fetch-collections ()
+  "Fetch list of available Zotero collections.
+Returns list of plists with :key, :name, :parentKey keys."
+  (let* ((library-id (org-zotero-annots--get-library-id))
+         (request-data (when library-id `((libraryID . ,library-id))))
+         (response (org-zotero-annots--http-post
+                    (format "http://localhost:%d/export-org/collections"
+                            org-zotero-annots-port)
+                    request-data)))
+    (when (and response (eq (plist-get response :success) t))
+      (mapcar (lambda (col)
+                (list :key (plist-get col :key)
+                      :name (plist-get col :name)
+                      :parentKey (plist-get col :parentKey)))
+              (plist-get response :collections)))))
+
+(defun org-zotero-annots--build-collection-path (collections col)
+  "Build full path for COL using COLLECTIONS list.
+Returns a string like \"Parent / Child / Grandchild\"."
+  (let ((name (plist-get col :name))
+        (parent-key (plist-get col :parentKey)))
+    (if parent-key
+        (let ((parent (seq-find (lambda (c) (equal (plist-get c :key) parent-key))
+                                collections)))
+          (if parent
+              (concat (org-zotero-annots--build-collection-path collections parent)
+                      " / " name)
+            name))
+      name)))
+
+(defun org-zotero-annots--select-collection ()
+  "Interactively select a Zotero collection.
+Returns the collection key as a string."
+  (let* ((collections (org-zotero-annots--fetch-collections))
+         (candidates (mapcar (lambda (col)
+                               (cons (org-zotero-annots--build-collection-path collections col)
+                                     (plist-get col :key)))
+                             collections)))
+    (if candidates
+        (let ((selection (completing-read "Select collection: "
+                                          (sort candidates (lambda (a b) (string< (car a) (car b))))
+                                          nil t)))
+          (cdr (assoc selection candidates)))
+      (user-error "No collections found. Is Zotero running?"))))
+
+(defun org-zotero-annots--fetch-collection (collection-key &optional recursive)
+  "Fetch annotations for COLLECTION-KEY from Zotero API.
+If RECURSIVE is non-nil, include subcollections.
+Returns a plist with :success, :org, :collectionName, :count, :items, and :error keys."
+  (let* ((library-id (org-zotero-annots--get-library-id))
+         (request-data `((collectionKey . ,collection-key)
+                         (format . "org")
+                         (recursive . ,(if recursive t :json-false))
+                         ,@(when library-id
+                             `((libraryID . ,library-id)))))
+         (url (format "http://localhost:%d/export-org/collection" org-zotero-annots-port))
+         (response (org-zotero-annots--http-post url request-data)))
+    (if response
+        (if (eq (plist-get response :success) t)
+            (list :success t
+                  :org (or (plist-get response :org)
+                           (plist-get response :content))
+                  :collectionName (plist-get response :collectionName)
+                  :count (plist-get response :totalAnnotations)
+                  :itemCount (plist-get response :itemCount)
+                  :items (plist-get response :items))
+          (list :success nil
+                :error (or (plist-get response :error) "Unknown API error")))
+      (list :success nil
+            :error (format "Connection failed (port %d). Is Zotero running?"
+                           org-zotero-annots-port)))))
+
+(defun org-zotero-annots--insert-collection-content (collection-key recursive at-point)
+  "Insert annotations for COLLECTION-KEY.
+If RECURSIVE is non-nil, include subcollections.
+If AT-POINT is non-nil, insert at point.
+Otherwise, insert at end of current subtree."
+  (let ((result (org-zotero-annots--fetch-collection collection-key recursive)))
+    (if (plist-get result :success)
+        (let* ((current-level (org-zotero-annots--current-level))
+               (target-level (if (zerop current-level) 1 (1+ current-level)))
+               (adjusted-org (org-zotero-annots--adjust-heading-level
+                              (plist-get result :org)
+                              target-level)))
+          ;; Position cursor
+          (unless at-point
+            (if (zerop current-level)
+                (goto-char (point-max))
+              (org-end-of-subtree t t)))
+          ;; Ensure we're on a new line
+          (unless (bolp) (insert "\n"))
+          ;; Insert the content
+          (insert adjusted-org)
+          (unless (bolp) (insert "\n"))
+          ;; Report success
+          (message "Inserted %d annotations from %d items in \"%s\""
+                   (plist-get result :count)
+                   (plist-get result :itemCount)
+                   (plist-get result :collectionName)))
+      ;; Report error
+      (user-error "Failed to fetch collection annotations: %s" (plist-get result :error)))))
 
 ;;; Internal Functions - Library Selection
 
@@ -341,6 +452,25 @@ Citation key selection method is controlled by `org-zotero-annots-citekey-source
 Citation key selection method is controlled by `org-zotero-annots-citekey-source'."
   (interactive (list (org-zotero-annots--read-citekey)))
   (org-zotero-annots--insert-content citekey t))
+
+;;;###autoload
+(defun org-zotero-annots-insert-collection (collection-key &optional recursive)
+  "Insert Zotero annotations for all items in COLLECTION-KEY.
+With prefix argument, include items from subcollections recursively.
+
+If not in a heading, insert at end of buffer as top-level heading.
+If in a heading, insert at end of current subtree as child heading."
+  (interactive (list (org-zotero-annots--select-collection)
+                     current-prefix-arg))
+  (org-zotero-annots--insert-collection-content collection-key recursive nil))
+
+;;;###autoload
+(defun org-zotero-annots-insert-collection-at-point (collection-key &optional recursive)
+  "Insert Zotero annotations for all items in COLLECTION-KEY at point.
+With prefix argument, include items from subcollections recursively."
+  (interactive (list (org-zotero-annots--select-collection)
+                     current-prefix-arg))
+  (org-zotero-annots--insert-collection-content collection-key recursive t))
 
 (provide 'org-zotero-annots)
 ;;; org-zotero-annots.el ends here
