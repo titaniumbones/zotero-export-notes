@@ -15,3 +15,6 @@ tsconfig.tsbuildinfo
 .scaffold
 build
 logs
+
+# Test output
+collections-list.json

@@ -1043,6 +1043,98 @@ function CollectionSelectEndpoint() {
 }
 
 /**
+ * HTTP endpoint handler for /export-org/collection/create
+ * Creates a new collection in a Zotero library.
+ * Accepts POST with JSON body: {"libraryID": <number>, "name": "<string>", "parentKey": "<string>" | null}
+ */
+function CollectionCreateEndpoint() {
+  // @ts-expect-error - Zotero endpoint pattern
+  this.supportedMethods = ["POST"];
+  // @ts-expect-error - Zotero endpoint pattern
+  this.permitBookmarklet = false;
+
+  // @ts-expect-error - Zotero endpoint pattern
+  this.init = async function (
+    data: unknown,
+    sendResponseCallback: (
+      status: number,
+      contentType?: string,
+      body?: string,
+    ) => void,
+  ) {
+    let libraryID: number | undefined;
+    let name: string | undefined;
+    let parentKey: string | null = null;
+
+    if (data && typeof data === "object") {
+      const dataObj = data as Record<string, unknown>;
+      if (typeof dataObj.libraryID === "number") {
+        libraryID = dataObj.libraryID;
+      }
+      if (typeof dataObj.name === "string") {
+        name = dataObj.name;
+      }
+      if (typeof dataObj.parentKey === "string") {
+        parentKey = dataObj.parentKey;
+      }
+    }
+
+    if (libraryID === undefined) {
+      sendResponseCallback(400, "application/json", JSON.stringify({
+        success: false,
+        error: "Missing 'libraryID' parameter",
+      }));
+      return;
+    }
+
+    if (!name) {
+      sendResponseCallback(400, "application/json", JSON.stringify({
+        success: false,
+        error: "Missing 'name' parameter",
+      }));
+      return;
+    }
+
+    try {
+      // Create new collection using Zotero's API
+      const ZoteroCollection = (Zotero as unknown as {
+        Collection: new () => {
+          libraryID: number;
+          name: string;
+          parentKey: string | null;
+          saveTx: () => Promise<void>;
+          key: string;
+        };
+      }).Collection;
+
+      const collection = new ZoteroCollection();
+      collection.libraryID = libraryID;
+      collection.name = name;
+      if (parentKey) {
+        collection.parentKey = parentKey;
+      }
+
+      await collection.saveTx();
+
+      sendResponseCallback(200, "application/json", JSON.stringify({
+        success: true,
+        collection: {
+          key: collection.key,
+          name: collection.name,
+          libraryID: collection.libraryID,
+          parentKey: collection.parentKey,
+        },
+      }));
+    } catch (e) {
+      sendResponseCallback(500, "application/json", JSON.stringify({
+        success: false,
+        error: `Error creating collection: ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    }
+  };
+}
+
+/**
  * Build a hierarchical tree of collections.
  */
 interface CollectionTreeNode {
@@ -1148,7 +1240,8 @@ export class ApiEndpoints {
     Zotero.Server.Endpoints["/export-org/collection"] = CollectionEndpoint;
     Zotero.Server.Endpoints["/export-org/collection/current"] = CollectionCurrentEndpoint;
     Zotero.Server.Endpoints["/export-org/collection/select"] = CollectionSelectEndpoint;
+    Zotero.Server.Endpoints["/export-org/collection/create"] = CollectionCreateEndpoint;
     Zotero.Server.Endpoints["/export-org/collections/list"] = CollectionsListHierarchicalEndpoint;
-    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker, /export-org/collections, /export-org/collection, /export-org/collection/current, /export-org/collection/select, /export-org/collections/list");
+    ztoolkit.log("Registered API endpoints: /export-org/citekey, /export-org/libraries, /export-org/picker, /export-org/collections, /export-org/collection, /export-org/collection/current, /export-org/collection/select, /export-org/collection/create, /export-org/collections/list");
   }
 }

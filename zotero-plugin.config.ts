@@ -39,7 +39,16 @@ export default defineConfig({
     ],
   },
 
+  server: {
+    prefs: {
+      "extensions.zotero.httpServer.port": 23119,
+    },
+  },
+
   test: {
+    prefs: {
+      "extensions.zotero.httpServer.port": 23119,
+    },
     waitForPlugin: `() => Zotero.${pkg.config.addonInstance}.data.initialized`,
   },
 
